@@ -1,0 +1,8 @@
+numpy
+pandas
+tensorflow
+python-binance
+ta
+matplotlib
+scikit-learn
+psycopg2-binary
