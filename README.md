@@ -1,6 +1,6 @@
 
 
-Welcome to the New Project repository! This project demonstrates a set of skills and technologies designed to provide valuable functionality and insights, ranging from data processing and analysis to web interface implementation. Below is an overview of the project's components and technical aspects.
+Welcome to my repository! This project demonstrates a set of skills and technologies designed to provide valuable functionality and insights, ranging from data processing and analysis to web interface implementation. Below is an overview of the project's components and technical aspects.
 
 Project Overview The project is structured to ensure flexibility, efficiency, and functionality, making it suitable for both individual usage and as part of a larger system. The primary objectives and features include:
 
