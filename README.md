@@ -2,7 +2,7 @@
 
 Welcome to my repository! This project demonstrates a set of skills and technologies designed to provide valuable functionality and insights, ranging from data processing and analysis to web interface implementation. Below is an overview of the project's components and technical aspects.
 
-#Project Overview# 
+#  Project Overview
 The project is structured to ensure flexibility, efficiency, and functionality, making it suitable for both individual usage and as part of a larger system. The primary objectives and features include:
 
 #Data Extraction#: Efficiently gathers financial data using APIs. Technical Indicators: Incorporates popular indicators like RSI, MACD, Bollinger Bands, and Stochastic Oscillator. Machine Learning: Uses neural networks and deep learning architectures for predictions. User Interface: Integrates real-time data visualization and interaction. Key Features
