@@ -5,7 +5,7 @@ import tensorflow as tf
 import logging
 import os
 import matplotlib.pyplot as plt
-from datetime import datetime
+from datetime import datetime, timedelta
 from data_extraction import get_historical_data
 from technical_indicators import (
     calculate_rsi, calculate_macd, calculate_bollinger_bands,
@@ -14,6 +14,7 @@ from technical_indicators import (
 )
 from db_utils import get_historical_data_from_db, get_scaler_stats, insert_prediction, insert_symbol, insert_interval, insert_technical_indicators, insert_normalized_data, check_technical_indicators_exists
 import glob
+from model_training import train_lstm_model
 
 logger = logging.getLogger(__name__)
 
@@ -147,51 +148,141 @@ def load_and_prepare_data(symbol, interval, days_back, look_back, api_key, api_s
 
     return X, last_price, data, features, last_timestamp, scalers
 
-def load_models(n_splits=5, target_mean=None, target_std=None, symbol=None, interval=None):
+def prepare_training_data(symbol, interval, days_back=30, look_back=360, api_key=None, api_secret=None):
+    logger.info(f"Підготовка даних для донавчання для {symbol} ({interval})")
+    data = get_historical_data_from_db(symbol, interval, days_back, api_key, api_secret)
+    if data.empty:
+        logger.error("Немає даних для донавчання.")
+        return None, None, None, None
+
+    data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
+    data.set_index('timestamp', inplace=True)
+    data = data[data['close'] > 0].sort_index(ascending=True)
+
+    data['close_lag1'] = data['close'].shift(1)
+    data['close_lag2'] = data['close'].shift(2)
+    data['close_diff'] = data['close'].diff()
+    data['log_return'] = np.log(data['close'] / data['close_lag1'])
+
+    data['hour_norm'] = (data.index.hour + data.index.minute / 60) / 24
+    data['day_norm'] = (data.index.dayofweek + data.index.hour / 24) / 7
+
+    data['RSI'] = calculate_rsi(data)
+    data['MACD'], data['MACD_Signal'] = calculate_macd(data[['close']])
+    data['Upper_Band'], data['Lower_Band'] = calculate_bollinger_bands(data)
+    data['Stoch'], data['Stoch_Signal'] = calculate_stochastic(data)
+    data['EMA'] = calculate_ema(data)
+    data['ATR'] = calculate_atr(data)
+    data['CCI'] = calculate_cci(data)
+    data['OBV'] = calculate_obv(data)
+    data['Volatility'] = data['close'].rolling(window=14).std()
+    data['ADX'] = calculate_adx(data)
+    data['VWAP'] = calculate_vwap(data)
+    data['Volume_Pct'] = data['volume'] / data['volume'].rolling(window=24).sum()
+
+    data = data.iloc[100:].dropna()
+    if data.empty or len(data) < look_back:
+        logger.error(f"Недостатньо даних після обробки для донавчання. Залишилось {len(data)} рядків, потрібно {look_back}.")
+        return None, None, None, None
+
+    features = ['close', 'volume', 'quote_av', 'trades', 'RSI', 'MACD', 'MACD_Signal',
+                'Upper_Band', 'Lower_Band', 'Stoch', 'Stoch_Signal', 'EMA', 'ATR', 'CCI', 'OBV', 'Volatility',
+                'ADX', 'VWAP', 'Volume_Pct', 'close_lag1', 'close_lag2', 'close_diff', 'log_return', 'hour_norm', 'day_norm']
+
+    scalers = {feat: tf.keras.layers.Normalization(axis=-1) for feat in features}
+    for feat in features:
+        scalers[feat].adapt(data[feat].values.reshape(-1, 1))
+    scaled_data = np.column_stack([scalers[feat](data[feat].values.reshape(-1, 1)).numpy() for feat in features])
+
+    X, y = [], []
+    for i in range(len(scaled_data) - look_back):
+        X.append(scaled_data[i:i + look_back])
+        y.append(scaled_data[i + look_back, features.index('close_diff')])
+    X = np.array(X)
+    y = np.array(y)
+
+    train_size = int(len(X) * 0.8)
+    X_train, X_val = X[:train_size], X[train_size:]
+    y_train, y_val = y[:train_size], y[train_size:]
+
+    return X_train, y_train, X_val, y_val
+
+def load_models(n_splits=5, target_mean=None, target_std=None, symbol=None, interval=None, api_key=None, api_secret=None):
     if symbol is None or interval is None:
         logger.error("Параметри symbol і interval є обов'язковими для завантаження моделей.")
         return []
 
     models = []
+    finetune_threshold = timedelta(days=30)
+    current_time = datetime.now()
+
     for fold in range(1, n_splits + 1):
         finetuned_pattern = os.path.join(BASE_DIR, f'lstm_model_fold_{fold}_finetuned_{symbol}_{interval}_*.keras')
         finetuned_models = glob.glob(finetuned_pattern)
 
+        model = None
         if finetuned_models:
             latest_finetuned_model_path = max(finetuned_models, key=os.path.getctime)
-            try:
-                model = tf.keras.models.load_model(latest_finetuned_model_path, custom_objects={
-                    'mape_metric': lambda x, y: mape_metric(x, y, target_mean, target_std)
-                }, safe_mode=False)
-                models.append(model)
-                logger.info(f"Завантажено найновішу донавчану модель для Fold {fold} з {latest_finetuned_model_path}.")
-                continue
-            except Exception as e:
-                logger.error(f"Не вдалося завантажити донавчану модель для Fold {fold} з {latest_finetuned_model_path}: {e}")
+            model_ctime = datetime.fromtimestamp(os.path.getctime(latest_finetuned_model_path))
+            if current_time - model_ctime < finetune_threshold:
+                try:
+                    model = tf.keras.models.load_model(latest_finetuned_model_path, custom_objects={
+                        'mape_metric': lambda x, y: mape_metric(x, y, target_mean, target_std),
+                        'custom_mape': lambda x, y: mape_metric(x, y, target_mean, target_std)
+                    }, safe_mode=False)
+                    logger.info(f"Завантажено найновішу донавчану модель для Fold {fold} з {latest_finetuned_model_path}.")
+                except Exception as e:
+                    logger.error(f"Не вдалося завантажити донавчану модель для Fold {fold} з {latest_finetuned_model_path}: {e}")
+            else:
+                logger.info(f"Модель для Fold {fold} застаріла ({model_ctime}). Запускаю донавчання.")
+                X_train, y_train, X_val, y_val = prepare_training_data(symbol, interval, api_key=api_key, api_secret=api_secret)
+                if X_train is None:
+                    logger.error(f"Не вдалося підготувати дані для донавчання для Fold {fold}.")
+                    continue
+                try:
+                    history, model = train_lstm_model(
+                        symbol=symbol,
+                        interval=interval,
+                        fold=fold - 1,
+                        finetune=True,
+                        existing_model=model,
+                        X_train=X_train,
+                        y_train=y_train,
+                        X_val=X_val,
+                        y_val=y_val,
+                        api_key=api_key,
+                        api_secret=api_secret
+                    )
+                    logger.info(f"Модель для Fold {fold} успішно донавчана.")
+                except Exception as e:
+                    logger.error(f"Помилка під час донавчання моделі для Fold {fold}: {e}")
+                    continue
 
-        base_model_path = os.path.join(BASE_DIR, f'lstm_model_fold_{fold}_{symbol}_{interval}.keras')
-        if not os.path.exists(base_model_path):
-            logger.error(f"Файл базової моделі {base_model_path} не знайдено.")
-            continue
+        if model is None:
+            base_model_path = os.path.join(BASE_DIR, f'lstm_model_fold_{fold}_{symbol}_{interval}.keras')
+            if os.path.exists(base_model_path):
+                try:
+                    model = tf.keras.models.load_model(base_model_path, custom_objects={
+                        'mape_metric': lambda x, y: mape_metric(x, y, target_mean, target_std),
+                        'custom_mape': lambda x, y: mape_metric(x, y, target_mean, target_std)
+                    }, safe_mode=False)
+                    logger.info(f"Базова модель для Fold {fold} успішно завантажена з {base_model_path}.")
+                except Exception as e:
+                    logger.error(f"Не вдалося завантажити базову модель для Fold {fold} з {base_model_path}: {e}")
 
-        try:
-            model = tf.keras.models.load_model(base_model_path, custom_objects={
-                'mape_metric': lambda x, y: mape_metric(x, y, target_mean, target_std)
-            }, safe_mode=False)
+        if model is not None:
             models.append(model)
-            logger.info(f"Базова модель для Fold {fold} успішно завантажена з {base_model_path}.")
-        except Exception as e:
-            logger.error(f"Не вдалося завантажити базову модель для Fold {fold} з {base_model_path}: {e}")
 
     if not models:
-        logger.error(f"Не вдалося завантажити жодної моделі для {symbol}_{interval}.")
+        logger.error(f"Не вдалося завантажити або донавчити жодної моделі для {symbol}_{interval}.")
+        return []
 
     return models
 
 def predict_price_multi_step(models, X_initial, last_price, target_mean, target_std, steps, features, data, scalers, interval):
     predictions_per_model = {f'fold_{i+1}': [] for i in range(len(models))}
     current_X = X_initial.copy()
-    current_price = float(last_price)  # Конвертація last_price у float
+    current_price = float(last_price)
     all_timestamps = []
 
     interval_map = {'5m': 5, '15m': 15, '30m': 30, '1h': 60, '1w': 7*24*60, '1M': 30*24*60}
@@ -201,14 +292,14 @@ def predict_price_multi_step(models, X_initial, last_price, target_mean, target_
         step_predictions = []
         for i, model in enumerate(models):
             pred = model.predict(current_X, verbose=0)
-            pred_scalar = float(pred.flatten()[0])  # Конвертація прогнозу у float
+            pred_scalar = float(pred.flatten()[0])
             real_diff_pred = (pred_scalar * float(target_std)) + float(target_mean)
             real_pred = current_price + real_diff_pred
             step_predictions.append(real_pred)
             predictions_per_model[f'fold_{i+1}'].append(real_pred)
 
-        avg_pred = float(np.mean(step_predictions))  # Конвертація середнього у float
-        pred_std = float(np.std(step_predictions))  # Конвертація стандартного відхилення у float
+        avg_pred = float(np.mean(step_predictions))
+        pred_std = float(np.std(step_predictions))
 
         last_timestamp = data.index[-1] + pd.Timedelta(minutes=minutes_per_step * (step + 1))
         all_timestamps.append(last_timestamp)
@@ -226,11 +317,9 @@ def update_input_data(last_row, predicted_price, data, features, scalers, step, 
     new_row = last_row.copy()
     last_close = data['close'].iloc[-1] + (last_row[features.index('close_diff')] * np.sqrt(scalers['close_diff'].variance.numpy()[0]) + scalers['close_diff'].mean.numpy()[0])
 
-    # Конвертація predicted_price у масив NumPy перед reshape
     predicted_price_array = np.array(predicted_price).reshape(-1, 1)
     new_row[features.index('close')] = scalers['close'](predicted_price_array).numpy()[0, 0]
 
-    # Аналогічно для інших значень
     last_close_array = np.array(last_close).reshape(-1, 1)
     new_row[features.index('close_lag1')] = scalers['close_lag1'](last_close_array).numpy()[0, 0]
     new_row[features.index('close_lag2')] = last_row[features.index('close_lag1')]
@@ -271,17 +360,26 @@ def plot_predictions(historical_data, predictions_df, symbol, interval):
 
 def main(symbol, interval, days_back, look_back, steps, api_key, api_secret):
     # Перевірка наявності моделей
-    # Перевірка наявності моделей
     model_exists = any(os.path.exists(os.path.join(BASE_DIR, f'lstm_model_fold_{fold}_{symbol}_{interval}.keras')) for fold in range(1, 6))
 
     # Перевірка наявності scaler_stats
     symbol_id = insert_symbol(symbol)
     interval_id = insert_interval(interval)
     target_mean, target_std = get_scaler_stats(symbol_id, interval_id)
+    if target_mean is None or target_std is None:
+        # Фallback до завантаження з файлу, якщо немає в базі
+        stats_file = os.path.join(BASE_DIR, f'scaler_stats_{symbol}_{interval}.csv')
+        if os.path.exists(stats_file):
+            scaler_stats = pd.read_csv(stats_file)
+            target_mean = float(scaler_stats['target_mean'][0])
+            target_std = float(scaler_stats['target_std'][0])
+            logger.info(f"Loaded target_mean={target_mean}, target_std={target_std} from {stats_file}")
+        else:
+            target_mean, target_std = 0.0, 1.0
+            logger.warning(f"Stats file {stats_file} not found, using defaults target_mean={target_mean}, target_std={target_std}")
 
     if target_mean is None or target_std is None or not model_exists:
         logger.info(f"Статистика масштабування або моделі для {symbol}_{interval} відсутні. Запускаю тренування.")
-        from model_training import train_lstm_model
         try:
             train_lstm_model(symbol=symbol, interval=interval, days_back=days_back, look_back=look_back, api_key=api_key, api_secret=api_secret)
         except Exception as e:
@@ -291,8 +389,15 @@ def main(symbol, interval, days_back, look_back, steps, api_key, api_secret):
         # Повторна перевірка після тренування
         target_mean, target_std = get_scaler_stats(symbol_id, interval_id)
         if target_mean is None or target_std is None:
-            logger.error(f"Після тренування все ще не знайдено scaler_stats для {symbol}_{interval}. Перевірте логи тренування.")
-            raise ValueError("Не вдалося зберегти статистику масштабування після тренування.")
+            stats_file = os.path.join(BASE_DIR, f'scaler_stats_{symbol}_{interval}.csv')
+            if os.path.exists(stats_file):
+                scaler_stats = pd.read_csv(stats_file)
+                target_mean = float(scaler_stats['target_mean'][0])
+                target_std = float(scaler_stats['target_std'][0])
+                logger.info(f"Loaded target_mean={target_mean}, target_std={target_std} from {stats_file} after training")
+            else:
+                logger.error(f"Після тренування все ще не знайдено scaler_stats для {symbol}_{interval}. Перевірте логи тренування.")
+                raise ValueError("Не вдалося зберегти статистику масштабування після тренування.")
 
     # Завантаження даних після тренування
     X, last_price, data, features, last_timestamp, scalers = load_and_prepare_data(symbol, interval, days_back, look_back, api_key, api_secret)
@@ -303,10 +408,10 @@ def main(symbol, interval, days_back, look_back, steps, api_key, api_secret):
     logger.info(f"Дані для прогнозування: {len(data)} рядків, діапазон дат від {data.index.min()} до {data.index.max()}")
     logger.info(f"Останній timestamp: {last_timestamp}, остання ціна: {last_price}")
 
-    models = load_models(n_splits=5, target_mean=target_mean, target_std=target_std, symbol=symbol, interval=interval)
+    models = load_models(n_splits=5, target_mean=target_mean, target_std=target_std, symbol=symbol, interval=interval, api_key=api_key, api_secret=api_secret)
     if not models:
-        logger.error("Не вдалося завантажити жодної моделі після тренування. Перевірте логи тренування.")
-        raise ValueError("Не вдалося завантажити жодної моделі після тренування.")
+        logger.error("Не вдалося завантажити або донавчити жодної моделі після тренування.")
+        raise ValueError("Не вдалося завантажити або донавчити жодної моделі після тренування.")
 
     try:
         predictions_per_model, timestamps = predict_price_multi_step(
@@ -348,3 +453,4 @@ def main(symbol, interval, days_back, look_back, steps, api_key, api_secret):
     plot_predictions(data, predictions_df, symbol, interval)
 
     logger.info(f"Прогнози збережено в PostgreSQL для {symbol} ({interval}).")
+    return predictions_df

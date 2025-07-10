@@ -188,11 +188,14 @@ def create_dataset(scaled_data, target, look_back):
         y.append(target[i])
     return np.array(X), np.array(y)
 
-def mape_metric(y_true, y_pred, target_mean, target_std):
+def mape_metric(y_true, y_pred, target_mean=0.0, target_std=1.0):
     y_true_denorm = y_true * target_std + target_mean
     y_pred_denorm = y_pred * target_std + target_mean
     mape = tf.reduce_mean(tf.abs((y_true_denorm - y_pred_denorm) / tf.abs(y_true_denorm + 1e-6))) * 100
     return mape
+
+def custom_mape(y_true, y_pred):
+    return mape_metric(y_true, y_pred, 0.0, 1.0)
 
 def build_model_with_attention(input_shape):
     inputs = layers.Input(shape=(None, input_shape[-1]))
@@ -211,124 +214,194 @@ def build_model_with_attention(input_shape):
     outputs = layers.Dense(1, activation='linear', bias_initializer='zeros')(dense_2)
     return tf.keras.Model(inputs=inputs, outputs=outputs)
 
-def train_lstm_model(symbol, interval, days_back, look_back, api_key, api_secret, epochs=200, batch_size=16, n_splits=5):
-    logger.info(f"Завантаження історичних даних для {symbol} з інтервалом {interval} за {days_back} днів.")
-    scaled_data, target, features, target_scaler, data = prepare_data(symbol, interval, days_back, look_back, api_key, api_secret)
-    if scaled_data is None:
-        return None, None
-
-    target_mean = target_scaler.mean.numpy()[0]
-    target_std = np.sqrt(target_scaler.variance.numpy()[0])
-    logger.info(f"Зберігаю scaler stats: target_mean={target_mean}, target_std={target_std}")
-
-    symbol_id = insert_symbol(symbol)
-    interval_id = insert_interval(interval)
-    insert_scaler_stats(symbol_id, interval_id, target_mean, target_std)
-
-    scaler_stats = pd.DataFrame({
-        'target_mean': [target_mean],
-        'target_std': [target_std]
-    })
-    scaler_stats.to_csv(os.path.join(BASE_DIR, f'scaler_stats_{symbol}_{interval}.csv'), index=False)
-    logger.info(f"Scaler stats збережено у scaler_stats_{symbol}_{interval}.csv")
-
-    X, y = create_dataset(scaled_data, target, look_back)
-    if X.shape[0] == 0:
-        logger.error("Недостатньо даних для тренування.")
-        return None, None
-
-    logger.info(f"Форма X: {X.shape}, форма y: {y.shape}")
-
-    kfold = KFold(n_splits=n_splits, shuffle=True, random_state=42)
-    histories = []
-    fold = 1
-
-    for train_index, val_index in kfold.split(X):
-        logger.info(f"Тренування Fold {fold}")
-        X_train, X_val = X[train_index], X[val_index]
-        y_train, y_val = y[train_index], y[val_index]
-
+def train_lstm_model(symbol, interval, days_back=None, look_back=None, api_key=None, api_secret=None, epochs=200, batch_size=16, n_splits=5,
+                    X_train=None, y_train=None, X_val=None, y_val=None, fold=None, finetune=False, existing_model=None):
+    if finetune and existing_model is not None and X_train is not None and y_train is not None and X_val is not None and y_val is not None:
+        logger.info(f"Fine-tuning Fold {fold + 1}")
         train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train)).batch(batch_size).prefetch(tf.data.AUTOTUNE)
         val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val)).batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
-        model = build_model_with_attention((None, X_train.shape[2]))
+        model = existing_model
         early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True)
         lr_schedule = tf.keras.optimizers.schedules.CosineDecay(0.0003, decay_steps=epochs * 100)
-
         optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule, clipnorm=1.0)
-        model.compile(optimizer=optimizer,
-                      loss='mean_squared_error',
-                      metrics=['mae', lambda x, y: mape_metric(x, y, target_mean, target_std)])
 
-        history = model.fit(train_dataset, epochs=epochs, validation_data=val_dataset,
-                            callbacks=[early_stopping], verbose=1)
+        # Load target_mean and target_std from saved stats
+        stats_file = os.path.join(BASE_DIR, f'scaler_stats_{symbol}_{interval}.csv')
+        target_mean = 0.0
+        target_std = 1.0
+        if os.path.exists(stats_file):
+            scaler_stats = pd.read_csv(stats_file)
+            target_mean = float(scaler_stats['target_mean'][0])
+            target_std = float(scaler_stats['target_std'][0])
+            logger.info(f"Loaded target_mean={target_mean}, target_std={target_std} from {stats_file}")
+        else:
+            logger.warning(f"Stats file {stats_file} not found, using defaults target_mean=0.0, target_std=1.0")
 
-        # Розрахунок метрик для валідації
+        model.compile(optimizer=optimizer, loss='mean_squared_error', metrics=['mae', custom_mape])
+
+        history = model.fit(train_dataset, epochs=epochs, validation_data=val_dataset, callbacks=[early_stopping], verbose=1)
+
+        # Log and save fine-tuned model
         val_predictions = model.predict(val_dataset)
         real_diff_preds = (val_predictions.flatten() * target_std) + target_mean
         real_diff_y_val = (y_val * target_std) + target_mean
-        last_prices = data['close'].iloc[val_index + look_back - 1].values
+        last_prices = np.zeros_like(real_diff_preds)  # Placeholder, adjust if actual prices are available
         real_preds = last_prices + real_diff_preds
         real_y_val = last_prices + real_diff_y_val
-
         real_mae = np.mean(np.abs(real_preds - real_y_val))
-        real_mape = np.mean(np.abs((real_preds - real_y_val) / real_y_val)) * 100
+        real_mape = np.mean(np.abs((real_preds - real_y_val) / (real_y_val + 1e-6))) * 100
 
-        logger.info(f"Fold {fold} - Реальний MAE: {real_mae:.2f} USDT")
-        logger.info(f"Fold {fold} - Реальний MAPE: {real_mape:.2f}%")
+        logger.info(f"Fold {fold + 1} - Реальний MAE: {real_mae:.2f} USDT")
+        logger.info(f"Fold {fold + 1} - Реальний MAPE: {real_mape:.2f}%")
 
+        symbol_id = insert_symbol(symbol)
+        interval_id = insert_interval(interval)
         for epoch in range(len(history.history['loss'])):
+            val_mape_key = 'val_custom_mape' if 'val_custom_mape' in history.history else 'val_mape'
+            mape_key = 'custom_mape' if 'custom_mape' in history.history else 'mape'
             history_data = {
                 'symbol_id': symbol_id,
                 'interval_id': interval_id,
-                'fold': fold,
+                'fold': fold + 1,
                 'epoch': epoch + 1,
                 'loss': history.history['loss'][epoch],
                 'mae': history.history['mae'][epoch],
-                'mape': history.history['lambda'][epoch],
+                'mape': history.history.get(mape_key, [0])[epoch] if epoch < len(history.history.get(mape_key, [])) else 0,
                 'val_loss': history.history['val_loss'][epoch],
                 'val_mae': history.history['val_mae'][epoch],
-                'val_mape': history.history['val_lambda'][epoch],
+                'val_mape': history.history.get(val_mape_key, [0])[epoch] if epoch < len(history.history.get(val_mape_key, [])) else 0,
                 'real_mae': real_mae,
                 'real_mape': real_mape
             }
             insert_training_history(history_data)
 
-        history_df = pd.DataFrame(history.history)
-        history_df['real_mae'] = real_mae
-        history_df['real_mape'] = real_mape
-        histories.append(history_df)
-
-        model_path = os.path.join(BASE_DIR, f'lstm_model_fold_{fold}_{symbol}_{interval}.keras')
+        model_path = os.path.join(BASE_DIR, f'lstm_model_fold_{fold + 1}_finetuned_{symbol}_{interval}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.keras')
         model.save(model_path)
-        logger.info(f"Модель для Fold {fold} збережено у {model_path}")
+        logger.info(f"Fine-tuned model for Fold {fold + 1} saved at {model_path}")
         tf.keras.backend.clear_session()
-        fold += 1
+        return history, model
+    elif not finetune and symbol and interval and days_back is not None and look_back is not None and api_key and api_secret:
+        logger.info(f"Завантаження історичних даних для {symbol} з інтервалом {interval} за {days_back} днів.")
+        scaled_data, target, features, target_scaler, data = prepare_data(symbol, interval, days_back, look_back, api_key, api_secret)
+        if scaled_data is None:
+            return None, None
 
-    combined_history = pd.concat(histories, keys=range(1, n_splits + 1))
-    combined_history.to_csv(os.path.join(BASE_DIR, f'training_history_{symbol}_{interval}.csv'))
-    logger.info(f"Історію тренування збережено у training_history_{symbol}_{interval}.csv")
+        target_mean = target_scaler.mean.numpy()[0]
+        target_std = np.sqrt(target_scaler.variance.numpy()[0])
+        logger.info(f"Зберігаю scaler stats: target_mean={target_mean}, target_std={target_std}")
 
-    plot_training_history(histories, n_splits, symbol, interval)
-    fine_tune_model(
-        symbol=symbol,
-        interval=interval,
-        days_back=days_back,
-        look_back=look_back,
-        api_key=api_key,
-        api_secret=api_secret,
-        data=data,  # Передаємо data у fine_tune_model
-        epochs=50,
-        batch_size=32
-    )
+        symbol_id = insert_symbol(symbol)
+        interval_id = insert_interval(interval)
+        insert_scaler_stats(symbol_id, interval_id, target_mean, target_std)
 
-    return histories, None
+        scaler_stats = pd.DataFrame({
+            'target_mean': [target_mean],
+            'target_std': [target_std]
+        })
+        scaler_stats.to_csv(os.path.join(BASE_DIR, f'scaler_stats_{symbol}_{interval}.csv'), index=False)
+        logger.info(f"Scaler stats збережено у scaler_stats_{symbol}_{interval}.csv")
 
-def custom_mape_metric(y_true, y_pred, target_mean, target_std):
-    y_true_denorm = y_true * target_std + target_mean
-    y_pred_denorm = y_pred * target_std + target_mean
-    mape = tf.reduce_mean(tf.abs((y_true_denorm - y_pred_denorm) / tf.abs(y_true_denorm + 1e-6))) * 100
-    return mape
+        X, y = create_dataset(scaled_data, target, look_back)
+        if X.shape[0] == 0:
+            logger.error("Недостатньо даних для тренування.")
+            return None, None
+
+        logger.info(f"Форма X: {X.shape}, форма y: {y.shape}")
+
+        kfold = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+        histories = []
+        fold = 1
+
+        for train_index, val_index in kfold.split(X):
+            logger.info(f"Тренування Fold {fold}")
+            X_train, X_val = X[train_index], X[val_index]
+            y_train, y_val = y[train_index], y[val_index]
+
+            train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train)).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+            val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val)).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+            model = build_model_with_attention((None, X_train.shape[2]))
+            early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True)
+            lr_schedule = tf.keras.optimizers.schedules.CosineDecay(0.0003, decay_steps=epochs * 100)
+
+            optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule, clipnorm=1.0)
+            model.compile(optimizer=optimizer,
+                          loss='mean_squared_error',
+                          metrics=['mae', lambda x, y: mape_metric(x, y, target_mean, target_std)])
+
+            history = model.fit(train_dataset, epochs=epochs, validation_data=val_dataset,
+                                callbacks=[early_stopping], verbose=1)
+
+            # Розрахунок метрик для валідації
+            val_predictions = model.predict(val_dataset)
+            real_diff_preds = (val_predictions.flatten() * target_std) + target_mean
+            real_diff_y_val = (y_val * target_std) + target_mean
+            last_prices = data['close'].iloc[val_index + look_back - 1].values
+            real_preds = last_prices + real_diff_preds
+            real_y_val = last_prices + real_diff_y_val
+
+            real_mae = np.mean(np.abs(real_preds - real_y_val))
+            real_mape = np.mean(np.abs((real_preds - real_y_val) / real_y_val)) * 100
+
+            logger.info(f"Fold {fold} - Реальний MAE: {real_mae:.2f} USDT")
+            logger.info(f"Fold {fold} - Реальний MAPE: {real_mape:.2f}%")
+
+            for epoch in range(len(history.history['loss'])):
+                val_mape_key = [k for k in history.history.keys() if 'val_' in k and ('lambda' in k or 'mape' in k)]
+                mape_key = [k for k in history.history.keys() if 'val_' not in k and ('lambda' in k or 'mape' in k)]
+
+                val_mape_key = val_mape_key[0] if val_mape_key else 'val_mape'
+                mape_key = mape_key[0] if mape_key else 'mape'
+
+                history_data = {
+                    'symbol_id': symbol_id,
+                    'interval_id': interval_id,
+                    'fold': fold,
+                    'epoch': epoch + 1,
+                    'loss': history.history['loss'][epoch],
+                    'mae': history.history['mae'][epoch],
+                    'mape': history.history.get(mape_key, [0])[epoch] if epoch < len(history.history.get(mape_key, [])) else 0,
+                    'val_loss': history.history['val_loss'][epoch],
+                    'val_mae': history.history['val_mae'][epoch],
+                    'val_mape': history.history.get(val_mape_key, [0])[epoch] if epoch < len(history.history.get(val_mape_key, [])) else 0,
+                    'real_mae': real_mae,
+                    'real_mape': real_mape
+                }
+                insert_training_history(history_data)
+
+            history_df = pd.DataFrame(history.history)
+            history_df['real_mae'] = real_mae
+            history_df['real_mape'] = real_mape
+            histories.append(history_df)
+
+            model_path = os.path.join(BASE_DIR, f'lstm_model_fold_{fold}_{symbol}_{interval}.keras')
+            model.save(model_path)
+            logger.info(f"Модель для Fold {fold} збережено у {model_path}")
+            tf.keras.backend.clear_session()
+            fold += 1
+
+        combined_history = pd.concat(histories, keys=range(1, n_splits + 1))
+        combined_history.to_csv(os.path.join(BASE_DIR, f'training_history_{symbol}_{interval}.csv'))
+        logger.info(f"Історію тренування збережено у training_history_{symbol}_{interval}.csv")
+
+        plot_training_history(histories, n_splits, symbol, interval)
+        fine_tune_model(
+            symbol=symbol,
+            interval=interval,
+            days_back=days_back,
+            look_back=look_back,
+            api_key=api_key,
+            api_secret=api_secret,
+            data=data,
+            epochs=50,
+            batch_size=32
+        )
+
+        return histories, None
+    else:
+        logger.error("Invalid parameters for training or fine-tuning.")
+        return None, None
 
 class EpochLogger(tf.keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
@@ -361,9 +434,11 @@ def fine_tune_model(symbol, interval, days_back, look_back, api_key, api_secret,
             model = build_model_with_attention((None, X.shape[2]))
         else:
             logger.info(f"Завантажую базову модель із {base_model_path}")
-            model = tf.keras.models.load_model(base_model_path, custom_objects={
-                'custom_mape_metric': lambda x, y: mape_metric(x, y, target_mean, target_std)
-            }, safe_mode=False)
+            try:
+                model = tf.keras.models.load_model(base_model_path, safe_mode=False)
+            except Exception as e:
+                logger.warning(f"Помилка завантаження моделі {base_model_path}: {e}. Створюю нову.")
+                model = build_model_with_attention((None, X.shape[2]))
 
         X_train, X_val = X[train_index], X[val_index]
         y_train, y_val = y[train_index], y[val_index]
@@ -372,14 +447,14 @@ def fine_tune_model(symbol, interval, days_back, look_back, api_key, api_secret,
         val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val)).batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
         early_stopping = tf.keras.callbacks.EarlyStopping(
-            monitor='val_custom_mape_metric',
+            monitor='val_loss',
             patience=15,
             mode='min',
             restore_best_weights=True,
             verbose=1
         )
         reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
-            monitor='val_custom_mape_metric',
+            monitor='val_loss',
             factor=0.5,
             patience=5,
             min_lr=1e-6,
@@ -411,6 +486,12 @@ def fine_tune_model(symbol, interval, days_back, look_back, api_key, api_secret,
         symbol_id = insert_symbol(symbol)
         interval_id = insert_interval(interval)
         for epoch in range(len(history.history['loss'])):
+            val_mape_key = [k for k in history.history.keys() if 'val_' in k and ('lambda' in k or 'mape' in k)]
+            mape_key = [k for k in history.history.keys() if 'val_' not in k and ('lambda' in k or 'mape' in k)]
+
+            val_mape_key = val_mape_key[0] if val_mape_key else 'val_mape'
+            mape_key = mape_key[0] if mape_key else 'mape'
+
             history_data = {
                 'symbol_id': symbol_id,
                 'interval_id': interval_id,
@@ -418,10 +499,10 @@ def fine_tune_model(symbol, interval, days_back, look_back, api_key, api_secret,
                 'epoch': epoch + 1,
                 'loss': history.history['loss'][epoch],
                 'mae': history.history['mae'][epoch],
-                'mape': history.history['lambda'][epoch],
+                'mape': history.history.get(mape_key, [0])[epoch] if epoch < len(history.history.get(mape_key, [])) else 0,
                 'val_loss': history.history['val_loss'][epoch],
                 'val_mae': history.history['val_mae'][epoch],
-                'val_mape': history.history['val_lambda'][epoch],
+                'val_mape': history.history.get(val_mape_key, [0])[epoch] if epoch < len(history.history.get(val_mape_key, [])) else 0,
                 'real_mae': np.mean(np.abs(real_preds - real_y_val)),
                 'real_mape': real_mape
             }
@@ -443,8 +524,8 @@ def auto_fine_tune(symbol, interval, initial_days_back, final_days_back, final_l
         models = fine_tune_model(
             symbol=symbol,
             interval=interval,
-            days_back=initial_days_back,
-            look_back=360,
+            days_back=final_days_back,
+            look_back=final_look_back,
             api_key=api_key,
             api_secret=api_secret,
             epochs=100,
@@ -473,7 +554,7 @@ def auto_fine_tune(symbol, interval, initial_days_back, final_days_back, final_l
                 look_back=final_look_back,
                 api_key=api_key,
                 api_secret=api_secret,
-                data=data,  # Передаємо data
+                data=data,
                 epochs=50,
                 batch_size=32
             )
