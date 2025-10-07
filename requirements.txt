@@ -8,3 +8,5 @@ scikit-learn
 psycopg2-binary
 redis
 joblib
+sqlalchemy
+dotenv

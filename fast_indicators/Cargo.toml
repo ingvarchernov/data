@@ -1,0 +1,19 @@
+[package]
+name = "fast_indicators"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "test_indicators"
+path = "src/main.rs"
+
+[lib]
+name = "fast_indicators"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.21", features = ["extension-module"] }
+numpy = "0.21"
+
+[features]
+default = []
