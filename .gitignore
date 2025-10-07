@@ -1,4 +1,4 @@
-.venv
+venv
 __pycache__
 *.pyc
 *.pyo
@@ -22,6 +22,7 @@ __pycache__
 .keras
 .idea
 .vscode
+target
 lstm_model_fold_1_BTCUSDT_1h.keras
 lstm_model_fold_1_finetuned_BTCUSDT_1h_20250519_170300.keras
 lstm_model_fold_2_BTCUSDT_1h.keras
@@ -58,3 +59,8 @@ lstm_model_fold_5_finetuned_BTCUSDT_1h_20250710_183210.keras
 lstm_model_fold_5_finetuned_BTCUSDT_1h_20250710_192916.keras
 prediction_plot_BTCUSDT_1h_20250710_231040.png
 predictions_BTCUSDT_1h_20250710_231039.csv
+gpu_test.py
+db_test.py
+test_status.py
+technical_indicators_backup.py
+cargo.lock
