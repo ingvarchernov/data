@@ -133,21 +133,40 @@ class OptimizedCryptoMLSystem:
                 logger.error(f"❌ Недостатньо даних після обробки: {len(data)} < {look_back}")
                 return None
             
-            # 3. Підготовка даних для ML
+            # 3. Підготовка стратегічних фічей для ML
+            # Додаємо стратегічні фічі
+            data['trend'] = data['close'] - data['EMA_20'] if 'EMA_20' in data.columns else 0
+            data['volatility'] = data['ATR'] if 'ATR' in data.columns else 0
+            data['return'] = data['close'].pct_change().fillna(0)
+            data['momentum'] = data['close'] - data['close'].shift(5).fillna(0)
+            if 'BB_Upper' in data.columns and 'BB_Lower' in data.columns:
+                data['bb_dist_upper'] = data['BB_Upper'] - data['close']
+                data['bb_dist_lower'] = data['close'] - data['BB_Lower']
+            # Додаємо всі технічні індикатори
+            strategic_features = ['trend', 'volatility', 'return', 'momentum', 'bb_dist_upper', 'bb_dist_lower',
+                                  'RSI', 'MACD', 'MACD_Signal', 'Stoch_K', 'Stoch_D', 'ATR', 'EMA_20', 'BB_Upper', 'BB_Lower']
+            # Додаємо об'єм
+            if 'volume' in data.columns:
+                strategic_features.append('volume')
+            # Формуємо фінальний список фічей
             feature_columns = [col for col in data.columns if col not in ['timestamp', 'data_id']]
+            # Додаємо стратегічні фічі, якщо їх немає
+            for f in strategic_features:
+                if f in data.columns and f not in feature_columns:
+                    feature_columns.append(f)
             X_data = data[feature_columns].values
-            
+
             # Нормалізація
             from sklearn.preprocessing import StandardScaler
             scaler = StandardScaler()
             X_scaled = scaler.fit_transform(X_data)
-            
+
             # Створення послідовностей
             X_sequences = []
             for i in range(len(X_scaled) - look_back):
                 X_sequences.append(X_scaled[i:i + look_back])
             X_sequences = np.array(X_sequences)
-            
+
             if len(X_sequences) == 0:
                 logger.error("❌ Не вдалося створити послідовності")
                 return None
@@ -222,31 +241,31 @@ class OptimizedCryptoMLSystem:
             
             for step in range(steps):
                 pred = model.predict(current_sequence, verbose=0)
-                predictions.append(float(pred[0, 0]))
-                
+                predictions.append(float(pred[0, 0].item()))
                 # Оновлюємо послідовність для наступного прогнозу
                 new_row = current_sequence[0, -1, :].copy()
-                new_row[feature_columns.index('close')] = pred[0, 0]
-                
+                new_row[feature_columns.index('close')] = float(pred[0, 0].item())
                 # Зсуваємо послідовність
                 current_sequence = np.roll(current_sequence, -1, axis=1)
                 current_sequence[0, -1, :] = new_row
             
             # Денормалізація прогнозів
-            close_idx = feature_columns.index('close')
-            predictions_denorm = scaler.inverse_transform(
-                np.column_stack([
-                    np.zeros((len(predictions), len(feature_columns) - 1)),
-                    predictions
-                ])
-            )[:, -1]
+            # Денормалізуємо кожен прогноз окремо, підставляючи його у відповідний вектор фічей
+            last_row = X_data[-1]
+            predictions_denorm = []
+            for p in predictions:
+                denorm_vec = last_row.copy()
+                denorm_vec[feature_columns.index('close')] = p
+                denorm = scaler.inverse_transform([denorm_vec])[0][feature_columns.index('close')]
+                predictions_denorm.append(denorm)
             
             # 6. Збереження результатів
             results = {
                 'symbol': symbol,
                 'interval': interval,
                 'timestamp': datetime.now().isoformat(),
-                'last_price': float(data['close'].iloc[-1]),
+                # Денормалізуємо останню ціну через scaler
+                'last_price': scaler.inverse_transform([X_data[-1]])[0][feature_columns.index('close')],
                 'predictions': predictions_denorm.tolist(),
                 'steps': steps,
                 'processing_time': (datetime.now() - start_time).total_seconds()

@@ -80,3 +80,4 @@ final_test.py
 demo_optimized.py
 db_utils.py
 base_main.py
+.gitignore
