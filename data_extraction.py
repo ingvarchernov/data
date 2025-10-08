@@ -18,6 +18,8 @@ def get_historical_data(symbol, interval, days_back, api_key, api_secret):
             'secret': api_secret,
             'enableRateLimit': True
         })
+        # Синхронізація часу з сервером Binance
+        exchange.load_time_difference()
         since = int((datetime.now() - timedelta(days=days_back)).timestamp() * 1000)
         timeframe = interval
         limit = days_back * 24 * 60 // get_interval_minutes(timeframe)

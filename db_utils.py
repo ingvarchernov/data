@@ -410,3 +410,165 @@ def get_scaler_stats(symbol_id, interval_id):
     except Exception as e:
         logger.error(f"Помилка при отриманні статистики масштабування для symbol_id={symbol_id}: {e}")
         return None, None
+
+# ===============================
+# ОПТИМІЗОВАНІ BATCH ОПЕРАЦІЇ ДЛЯ ШВИДКОДІЇ
+# ===============================
+
+def batch_insert_historical_data(data_list, symbol_id, interval_id):
+    """ШВИДКА batch вставка історичних даних (замість повільних одинарних)."""
+    import time
+    start_time = time.time()
+    
+    try:
+        if not data_list:
+            return []
+            
+        # Підготовка даних для batch insert
+        records = []
+        for data_point in data_list:
+            records.append({
+                'symbol_id': symbol_id,
+                'interval_id': interval_id,
+                'timestamp': data_point['timestamp'],
+                'open': float(data_point['open']),
+                'high': float(data_point['high']),
+                'low': float(data_point['low']),
+                'close': float(data_point['close']),
+                'volume': float(data_point['volume']),
+                'quote_av': float(data_point.get('quote_av', data_point['volume'] * data_point['close'])),
+                'trades': int(data_point.get('trades', 0)),
+                'tb_base_av': float(data_point.get('tb_base_av', data_point['volume'] * 0.5)),
+                'tb_quote_av': float(data_point.get('tb_quote_av', data_point['volume'] * data_point['close'] * 0.5)),
+            })
+        
+        with engine.connect() as conn:
+            # Виконуємо batch insert з upsert
+            data_ids = []
+            stmt = text("""
+                INSERT INTO historical_data 
+                (symbol_id, interval_id, timestamp, open, high, low, close, volume, quote_av, trades, tb_base_av, tb_quote_av)
+                VALUES 
+                (:symbol_id, :interval_id, :timestamp, :open, :high, :low, :close, :volume, :quote_av, :trades, :tb_base_av, :tb_quote_av)
+                ON CONFLICT (symbol_id, interval_id, timestamp)
+                DO UPDATE SET
+                    open = EXCLUDED.open,
+                    high = EXCLUDED.high,
+                    low = EXCLUDED.low,
+                    close = EXCLUDED.close,
+                    volume = EXCLUDED.volume,
+                    quote_av = EXCLUDED.quote_av,
+                    trades = EXCLUDED.trades,
+                    tb_base_av = EXCLUDED.tb_base_av,
+                    tb_quote_av = EXCLUDED.tb_quote_av
+                RETURNING data_id
+            """)
+            
+            # Виконуємо batch вставку
+            for record in records:
+                result = conn.execute(stmt, record)
+                data_id = result.scalar()
+                data_ids.append(data_id)
+            
+            conn.commit()
+        
+        duration = time.time() - start_time
+        speed = len(records) / duration if duration > 0 else 0
+        logger.info(f"✅ BATCH INSERT: {len(records)} записів за {duration:.3f}s ({speed:.0f} записів/сек)")
+        
+        return data_ids
+        
+    except Exception as e:
+        logger.error(f"❌ Помилка при batch insert історичних даних: {e}")
+        raise
+
+
+def batch_insert_technical_indicators(indicators_list):
+    """ШВИДКА batch вставка технічних індикаторів (замість повільних одинарних)."""
+    import time
+    start_time = time.time()
+    
+    try:
+        if not indicators_list:
+            return 0
+        
+        with engine.connect() as conn:
+            # Batch upsert технічних індикаторів
+            stmt = text("""
+                INSERT INTO technical_indicators 
+                (data_id, rsi, macd, macd_signal, upper_band, lower_band, stoch, stoch_signal, 
+                 ema, atr, cci, obv, volatility, volume_pct, close_lag1, close_lag2, 
+                 close_diff, log_return, hour_norm, day_norm, adx, vwap)
+                VALUES 
+                (:data_id, :rsi, :macd, :macd_signal, :upper_band, :lower_band, :stoch, :stoch_signal,
+                 :ema, :atr, :cci, :obv, :volatility, :volume_pct, :close_lag1, :close_lag2,
+                 :close_diff, :log_return, :hour_norm, :day_norm, :adx, :vwap)
+                ON CONFLICT (data_id)
+                DO UPDATE SET
+                    rsi = EXCLUDED.rsi,
+                    macd = EXCLUDED.macd,
+                    macd_signal = EXCLUDED.macd_signal,
+                    upper_band = EXCLUDED.upper_band,
+                    lower_band = EXCLUDED.lower_band,
+                    stoch = EXCLUDED.stoch,
+                    stoch_signal = EXCLUDED.stoch_signal,
+                    ema = EXCLUDED.ema,
+                    atr = EXCLUDED.atr,
+                    cci = EXCLUDED.cci,
+                    obv = EXCLUDED.obv,
+                    volatility = EXCLUDED.volatility,
+                    volume_pct = EXCLUDED.volume_pct,
+                    close_lag1 = EXCLUDED.close_lag1,
+                    close_lag2 = EXCLUDED.close_lag2,
+                    close_diff = EXCLUDED.close_diff,
+                    log_return = EXCLUDED.log_return,
+                    hour_norm = EXCLUDED.hour_norm,
+                    day_norm = EXCLUDED.day_norm,
+                    adx = EXCLUDED.adx,
+                    vwap = EXCLUDED.vwap
+            """)
+            
+            # Виконуємо batch вставку
+            conn.execute(stmt, indicators_list)
+            conn.commit()
+        
+        duration = time.time() - start_time
+        speed = len(indicators_list) / duration if duration > 0 else 0
+        logger.info(f"✅ BATCH INDICATORS: {len(indicators_list)} записів за {duration:.3f}s ({speed:.0f} записів/сек)")
+        
+        return len(indicators_list)
+        
+    except Exception as e:
+        logger.error(f"❌ Помилка при batch insert технічних індикаторів: {e}")
+        raise
+
+
+def optimize_database_performance():
+    """Оптимізація БД для максимальної швидкодії."""
+    try:
+        with engine.connect() as conn:
+            optimization_queries = [
+                # Створення індексів для швидкодії
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_historical_data_symbol_interval_timestamp ON historical_data (symbol_id, interval_id, timestamp DESC);",
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_technical_indicators_data_id ON technical_indicators (data_id);",
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_symbols_symbol ON symbols (symbol);",
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_intervals_interval ON intervals (interval);",
+                # Аналіз таблиць для оптимізації планувальника
+                "ANALYZE historical_data;",
+                "ANALYZE technical_indicators;",
+                "ANALYZE symbols;",
+                "ANALYZE intervals;",
+            ]
+            
+            for query in optimization_queries:
+                try:
+                    conn.execute(text(query))
+                    conn.commit()
+                    logger.info(f"✅ Оптимізація: {query[:50]}...")
+                except Exception as e:
+                    logger.warning(f"⚠️ Оптимізація пропущена (можливо, вже існує): {e}")
+                    
+        logger.info("🚀 Оптимізація БД завершена!")
+                    
+    except Exception as e:
+        logger.error(f"❌ Помилка при оптимізації БД: {e}")
