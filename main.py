@@ -134,7 +134,7 @@ class OptimizedCryptoMLSystem:
                 return None
             
             # 3. Підготовка стратегічних фічей для ML
-            # Додаємо стратегічні фічі
+            # Додаємо стратегічні фічі rrr
             data['trend'] = data['close'] - data['EMA_20'] if 'EMA_20' in data.columns else 0
             data['volatility'] = data['ATR'] if 'ATR' in data.columns else 0
             data['return'] = data['close'].pct_change().fillna(0)
