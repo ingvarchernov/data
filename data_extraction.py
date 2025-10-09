@@ -20,12 +20,38 @@ def get_historical_data(symbol, interval, days_back, api_key, api_secret):
         })
         # Синхронізація часу з сервером Binance
         exchange.load_time_difference()
-        since = int((datetime.now() - timedelta(days=days_back)).timestamp() * 1000)
+        
         timeframe = interval
-        limit = days_back * 24 * 60 // get_interval_minutes(timeframe)
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit)
+        interval_ms = get_interval_minutes(timeframe) * 60 * 1000
+        
+        # Binance ліміт - 1000 записів за запит
+        # Для days_back днів з інтервалом потрібно завантажувати порціями
+        requested_records = days_back * 24 * 60 // get_interval_minutes(timeframe)
+        max_per_request = 1000
+        
+        all_data = []
+        since = int((datetime.now() - timedelta(days=days_back)).timestamp() * 1000)
+        
+        while requested_records > 0:
+            limit = min(max_per_request, requested_records)
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit)
+            
+            if not ohlcv:
+                break
+            
+            all_data.extend(ohlcv)
+            requested_records -= len(ohlcv)
+            
+            # Наступний запит починається з часу останньої свічки + 1 інтервал
+            since = ohlcv[-1][0] + interval_ms
+            
+            logger.debug(f"Завантажено {len(ohlcv)} записів, залишилось {requested_records}")
+            
+            if len(ohlcv) < limit:
+                # Отримали менше, ніж запитували - більше даних немає
+                break
 
-        data = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        data = pd.DataFrame(all_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
         data['quote_av'] = data['volume'] * data['close']
         data['trades'] = 0

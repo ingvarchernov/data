@@ -63,14 +63,46 @@ def _pandas_fallback_stochastic(data: pd.DataFrame, k_period: int = 14, smooth_k
     d_smooth = k_smooth.rolling(window=smooth_d).mean()
     return k_smooth.dropna(), d_smooth.dropna()
 
-def _pandas_fallback_atr(data: pd.DataFrame, period: int = 14) -> pd.Series:
-    """Python fallback для ATR"""
-    prev_close = data['close'].shift(1)
-    tr1 = data['high'] - data['low']
-    tr2 = abs(data['high'] - prev_close)
-    tr3 = abs(data['low'] - prev_close)
-    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    return true_range.rolling(window=period).mean().dropna()
+def _pandas_fallback_williams_r(data: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Python fallback для Williams %R"""
+    highest_high = data['high'].rolling(window=period).max()
+    lowest_low = data['low'].rolling(window=period).min()
+    williams_r = -100 * ((highest_high - data['close']) / (highest_high - lowest_low))
+    return williams_r.dropna()
+
+def _pandas_fallback_cci(data: pd.DataFrame, period: int = 20) -> pd.Series:
+    """Python fallback для Commodity Channel Index"""
+    typical_price = (data['high'] + data['low'] + data['close']) / 3
+    sma = typical_price.rolling(window=period).mean()
+    mad = typical_price.rolling(window=period).apply(lambda x: np.mean(np.abs(x - x.mean())))
+    cci = (typical_price - sma) / (0.015 * mad)
+    return cci.dropna()
+
+def _pandas_fallback_adx(data: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Python fallback для Average Directional Index"""
+    high = data['high']
+    low = data['low']
+    close = data['close']
+
+    # True Range
+    tr1 = high - low
+    tr2 = abs(high - close.shift(1))
+    tr3 = abs(low - close.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    # Directional Movement
+    dm_plus = np.where((high - high.shift(1)) > (low.shift(1) - low), high - high.shift(1), 0)
+    dm_minus = np.where((low.shift(1) - low) > (high - high.shift(1)), low.shift(1) - low, 0)
+
+    # Smoothed averages
+    atr = tr.rolling(window=period).mean()
+    di_plus = 100 * (pd.Series(dm_plus).rolling(window=period).mean() / atr)
+    di_minus = 100 * (pd.Series(dm_minus).rolling(window=period).mean() / atr)
+
+    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = dx.rolling(window=period).mean()
+
+    return adx.dropna()
 
 class OptimizedIndicatorCalculator:
     """Оптимізований калькулятор технічних індикаторів з пріоритетом Rust"""
@@ -278,32 +310,46 @@ class OptimizedIndicatorCalculator:
         cci = (typical_price - sma) / (0.015 * mad)
         return cci.dropna()
 
-    async def calculate_obv_async(self, data: pd.DataFrame) -> pd.Series:
-        """Розрахунок OBV"""
+    async def calculate_williams_r_async(self, data: pd.DataFrame, period: int = 14) -> pd.Series:
+        """Асинхронний розрахунок Williams %R"""
+        # Простий pandas fallback (Williams %R відносно простий)
+        highest_high = data['high'].rolling(window=period).max()
+        lowest_low = data['low'].rolling(window=period).min()
+        williams_r = -100 * ((highest_high - data['close']) / (highest_high - lowest_low))
+        result = williams_r.dropna()
+        result.name = 'Williams_R'
+        return result
+
+    async def calculate_cci_async(self, data: pd.DataFrame, period: int = 20) -> pd.Series:
+        """Асинхронний розрахунок CCI"""
         if RUST_AVAILABLE:
             try:
+                high = data['high'].values.astype(np.float64)
+                low = data['low'].values.astype(np.float64)
                 close = data['close'].values.astype(np.float64)
-                volume = data['volume'].values.astype(np.float64)
                 
                 if self.use_async and self.thread_executor:
                     loop = asyncio.get_event_loop()
-                    obv_values = await loop.run_in_executor(
+                    cci_values = await loop.run_in_executor(
                         self.thread_executor,
-                        fast_indicators.fast_obv,
-                        close, volume
+                        fast_indicators.fast_cci,
+                        high, low, close, period
                     )
                 else:
-                    obv_values = fast_indicators.fast_obv(close, volume)
-                    
-                return pd.Series(obv_values, index=data.index[:len(obv_values)], name='OBV')
+                    cci_values = fast_indicators.fast_cci(high, low, close, period)
+                
+                result_index = data.index[period-1:period-1+len(cci_values)]
+                return pd.Series(cci_values, index=result_index, name='CCI')
                 
             except Exception as e:
-                logger.warning(f"Rust OBV failed, fallback to pandas: {e}")
+                logger.warning(f"Rust CCI failed, fallback to pandas: {e}")
         
         # Pandas fallback
-        price_change = data['close'].diff()
-        obv = (np.sign(price_change) * data['volume']).cumsum()
-        return obv.dropna()
+        typical_price = (data['high'] + data['low'] + data['close']) / 3
+        sma = typical_price.rolling(window=period).mean()
+        mad = typical_price.rolling(window=period).apply(lambda x: np.mean(np.abs(x - x.mean())))
+        cci = (typical_price - sma) / (0.015 * mad)
+        return cci.dropna()
 
     async def calculate_adx_async(self, data: pd.DataFrame, period: int = 14) -> pd.Series:
         """Розрахунок ADX"""
@@ -366,29 +412,42 @@ class OptimizedIndicatorCalculator:
             self.calculate_macd_async(data, config['macd_fast'], config['macd_slow'], config['macd_signal']),
             self.calculate_bollinger_bands_async(data, config['bb_period'], config['bb_std']),
             self.calculate_stochastic_async(data, config['stoch_k'], config['stoch_smooth_k'], config['stoch_smooth_d']),
-            self.calculate_atr_async(data, config['atr_period'])
+            self.calculate_atr_async(data, config['atr_period']),
+            # Нові індикатори
+            self.calculate_williams_r_async(data, 14),
+            self.calculate_cci_async(data, 20),
+            self.calculate_ema_async(data, 10),  # EMA_10
+            self.calculate_ema_async(data, 50),  # EMA_50
         ]
         
         results = await asyncio.gather(*tasks)
         
         # Розпаковуємо результати
         rsi = results[0]
-        ema = results[1]
+        ema_20 = results[1]
         macd, macd_signal = results[2]
         bb_upper, bb_lower = results[3]
-        stoch, stoch_signal = results[4]
+        stoch_k, stoch_d = results[4]
         atr = results[5]
+        williams_r = results[6]
+        cci = results[7]
+        ema_10 = results[8]
+        ema_50 = results[9]
         
         return {
             'RSI': rsi,
-            'EMA': ema,
+            'EMA_20': ema_20,
+            'EMA_10': ema_10,
+            'EMA_50': ema_50,
             'MACD': macd,
             'MACD_Signal': macd_signal,
-            'Upper_Band': bb_upper,
-            'Lower_Band': bb_lower,
-            'Stoch': stoch,
-            'Stoch_Signal': stoch_signal,
-            'ATR': atr
+            'BB_Upper': bb_upper,
+            'BB_Lower': bb_lower,
+            'Stoch_K': stoch_k,
+            'Stoch_D': stoch_d,
+            'ATR': atr,
+            'Williams_R': williams_r,
+            'CCI': cci
         }
 
 # ============================================================================

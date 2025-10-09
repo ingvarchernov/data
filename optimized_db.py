@@ -112,14 +112,8 @@ class OptimizedDatabaseManager:
         if use_redis:
             try:
                 self.redis_client = redis.from_url(redis_url, max_connections=20, decode_responses=False)
-                # Тестуємо з'єднання (через event loop)
-                try:
-                    import asyncio
-                    loop = asyncio.get_event_loop()
-                    loop.run_until_complete(self.redis_client.ping())
-                except Exception as e:
-                    logger.warning(f"⚠️ Redis ping не вдалося: {e}")
-                logger.info("✅ Redis підключено успішно")
+                # Не тестуємо з'єднання синхронно під час імпорту - це може спричинити проблеми
+                logger.info("✅ Redis клієнт створено")
             except Exception as e:
                 logger.warning(f"⚠️ Redis недоступний, використовується тільки memory cache: {e}")
                 self.use_redis = False
@@ -129,12 +123,13 @@ class OptimizedDatabaseManager:
         self._load_table_metadata()
         
     def _load_table_metadata(self):
-        """Завантаження метаданих таблиць"""
+        """Завантаження метаданих таблиць (lazy loading)"""
         try:
-            self.metadata.reflect(bind=self.sync_engine)
-            logger.info(f"✅ Завантажено метадані для {len(self.metadata.tables)} таблиць")
+            # Не завантажуємо метадані відразу при імпорті
+            # Це буде зроблено при першому використанні
+            pass
         except Exception as e:
-            logger.error(f"❌ Помилка завантаження метаданих: {e}")
+            logger.error(f"❌ Помилка ініціалізації метаданих: {e}")
     
     def _generate_cache_key(self, query: str, params: Dict = None) -> str:
         """Генерація ключа для кешування"""
@@ -302,7 +297,15 @@ class OptimizedDatabaseManager:
             'start_time': start_time
         }
         
-        return await self.execute_query_cached(query, params, use_cache)
+        df = await self.execute_query_cached(query, params, use_cache)
+        
+        # Фільтрація аномалій, як у старому проекті
+        if not df.empty and 'close' in df.columns:
+            logger.debug(f"Початкова кількість рядків: {len(df)}")
+            df = df[(df['close'] > 0) & (df['close'].pct_change().abs() < 0.1)].copy()
+            logger.debug(f"Після фільтрації аномалій: {len(df)}")
+        
+        return df
     
     async def get_technical_indicators_batch(self, data_ids: List[int]) -> pd.DataFrame:
         """Пакетне отримання технічних індикаторів"""

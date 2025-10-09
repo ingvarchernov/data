@@ -1,26 +1,29 @@
 # -*- coding: utf-8 -*-
 """
-Оптимізована конфігурація системи
+Оптимізована конфігурація - МАКСИМАЛЬНА для GTX 1050 4GB
 """
 
-# Базові параметри торгівлі
 SYMBOL = "BTCUSDT"
 INTERVAL = "1h"
-DAYS_BACK = 365
-LOOK_BACK = 360
+DAYS_BACK = 365  # 1 рік історії - баланс між обсягом та якістю валідації
+LOOK_BACK = 360  # 1 тиждень історії - оптимально для GPU
 STEPS = 5
 
-# Параметри ML моделі
 MODEL_CONFIG = {
-    "model_type": "transformer_lstm",  # "transformer_lstm", "advanced_lstm", "cnn_lstm"
-    "epochs": 100,
-    "batch_size": 32,
-    "learning_rate": 0.001,
-    "patience": 50,
-    "validation_split": 0.2
+    "model_type": "advanced_lstm",  # Змінено з transformer_lstm на простішу модель
+    "lstm_units_1": 384,  # Трохи зменшено для GPU memory
+    "lstm_units_2": 192,  # Трохи зменшено
+    "lstm_units_3": 96,  # Трохи зменшено
+    "attention_heads": 8,  # Збільшено
+    "attention_key_dim": 32,  # Збільшено
+    "dense_units": [256, 128, 64],  # Розширено
+    "epochs": 10,  # Збільшено для кращого навчання
+    "batch_size": 64,  # Зменшено для GTX 1050 (3.4GB VRAM)
+    "learning_rate": 0.0003,  # Ще зменшено для кращої стабільності
+    "patience": 15,  # Збільшено
+    "validation_split": 0.2  # Залишаємо
 }
 
-# Параметри технічних індикаторів
 INDICATORS_CONFIG = {
     "rsi_period": 14,
     "ema_period": 20,
@@ -35,16 +38,14 @@ INDICATORS_CONFIG = {
     "atr_period": 14
 }
 
-# Параметри кешування
 CACHE_CONFIG = {
     "redis_url": "redis://localhost:6379",
-    "default_ttl": 3600,  # секунди
+    "default_ttl": 3600,
     "memory_cache_size": 1000,
     "use_redis": True,
     "use_memory": True
 }
 
-# Параметри бази даних
 DB_CONFIG = {
     "pool_size": 20,
     "max_overflow": 30,
@@ -52,7 +53,6 @@ DB_CONFIG = {
     "pool_recycle": 3600
 }
 
-# Параметри асинхронної системи
 ASYNC_CONFIG = {
     "max_workers": 6,
     "thread_pool_size": 12,
@@ -60,54 +60,8 @@ ASYNC_CONFIG = {
     "task_queue_size": 1000
 }
 
-# Параметри GPU
 GPU_CONFIG = {
     "use_mixed_precision": True,
-    "use_xla": True,
+    "use_xla": False,  # Вимкнено через memory issues
     "memory_growth": True
-}
-
-# Параметри системних ресурсів
-RESOURCE_CONFIG = {
-    "cpu_threshold": 80.0,  # %
-    "memory_threshold": 85.0,  # %
-    "gpu_memory_threshold": 90.0,  # %
-}
-
-# Параметри логування
-LOGGING_CONFIG = {
-    "level": "INFO",
-    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    "file": "optimized_app.log",
-    "max_size": "100MB",
-    "backup_count": 5
-}
-
-# Шляхи файлів
-PATHS = {
-    "models": "models/",
-    "logs": "logs/",
-    "data": "data/",
-    "cache": "cache/",
-    "exports": "exports/"
-}
-
-# Параметри безпеки
-SECURITY_CONFIG = {
-    "max_retries": 3,
-    "timeout": 30,
-    "rate_limit": 100,  # запитів на хвилину
-    "encrypt_cache": False
-}
-
-# Параметри моніторингу
-MONITORING_CONFIG = {
-    "enable_metrics": True,
-    "metrics_interval": 60,  # секунди
-    "alert_thresholds": {
-        "error_rate": 5.0,  # %
-        "response_time": 10.0,  # секунди
-        "memory_usage": 90.0,  # %
-        "cpu_usage": 85.0  # %
-    }
 }

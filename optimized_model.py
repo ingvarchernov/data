@@ -4,16 +4,16 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 
-# --- Кастомні метрики ---
-
 @tf.keras.utils.register_keras_serializable()
 def mape(y_true, y_pred):
+    """MAPE метрика з кращою стабільністю"""
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
     return tf.reduce_mean(tf.abs((y_true - y_pred) / (tf.abs(y_true) + 1e-6))) * 100
 
 @tf.keras.utils.register_keras_serializable()
 def directional_accuracy(y_true, y_pred):
+    """Точність напрямку руху ціни"""
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
     true_direction = tf.sign(y_true)
@@ -30,6 +30,87 @@ logger = logging.getLogger(__name__)
 
 # Налаштування mixed precision
 mixed_precision.set_global_policy('mixed_float16')
+
+
+class DatabaseHistoryCallback(callbacks.Callback):
+    """Callback для збереження історії тренування в базу даних"""
+    
+    def __init__(self, db_engine, symbol_id: int, interval_id: int, fold: int = 1):
+        super().__init__()
+        self.db_engine = db_engine
+        self.symbol_id = symbol_id
+        self.interval_id = interval_id
+        self.fold = fold
+    
+    def on_epoch_end(self, epoch, logs=None):
+        """Збереження метрик епохи в БД"""
+        if logs is None:
+            return
+        
+        try:
+            from sqlalchemy import text
+            with self.db_engine.connect() as conn:
+                conn.execute(text("""
+                    INSERT INTO training_history 
+                    (symbol_id, interval_id, fold, epoch, loss, mae, val_loss, val_mae)
+                    VALUES (:symbol_id, :interval_id, :fold, :epoch, :loss, :mae, :val_loss, :val_mae)
+                    ON CONFLICT (symbol_id, interval_id, fold, epoch)
+                    DO UPDATE SET
+                        loss = EXCLUDED.loss,
+                        mae = EXCLUDED.mae,
+                        val_loss = EXCLUDED.val_loss,
+                        val_mae = EXCLUDED.val_mae
+                """), {
+                    'symbol_id': self.symbol_id,
+                    'interval_id': self.interval_id,
+                    'fold': self.fold,
+                    'epoch': epoch + 1,  # epoch починається з 0, але зберігаємо з 1
+                    'loss': float(logs.get('loss', 0)),
+                    'mae': float(logs.get('mae', 0)),
+                    'val_loss': float(logs.get('val_loss', 0)),
+                    'val_mae': float(logs.get('val_mae', 0))
+                })
+                conn.commit()
+        except Exception as e:
+            logger.error(f"❌ Помилка збереження в БД: {e}")
+
+
+class DenormalizedMetricsCallback(callbacks.Callback):
+    """Callback для виводу спрощених метрик"""
+    
+    def __init__(self, scaler=None, feature_index: int = None, X_val: np.ndarray = None, y_val: np.ndarray = None):
+        super().__init__()
+        self.scaler = scaler
+        self.feature_index = feature_index
+        self.X_val = X_val
+        self.y_val = y_val
+    
+    def on_epoch_end(self, epoch, logs=None):
+        """Вивід метрик після епохи"""
+        if logs is None:
+            return
+        
+        try:
+            # Отримуємо передбачення на валідаційних даних
+            if self.X_val is not None and self.y_val is not None:
+                y_pred = self.model.predict(self.X_val, verbose=0).flatten()
+                
+                # Розраховуємо метрики на нормалізованих даних
+                mae_norm = np.mean(np.abs(self.y_val - y_pred))
+                mape_norm = np.mean(np.abs((self.y_val - y_pred) / (np.abs(self.y_val) + 1e-6))) * 100
+                
+                # Точність напрямку
+                true_direction = np.sign(self.y_val)
+                pred_direction = np.sign(y_pred)
+                dir_acc = np.mean(true_direction == pred_direction) * 100
+                
+                logger.info(f"💰 Нормалізовані метрики (Epoch {epoch + 1}): "
+                           f"MAE={mae_norm:.4f}, MAPE={mape_norm:.2f}%, "
+                           f"Напрямок={dir_acc:.1f}%")
+            
+        except Exception as e:
+            logger.error(f"❌ Помилка розрахунку метрик: {e}")
+
 
 class TransformerBlock(layers.Layer):
     """Transformer блок з Multi-Head Attention"""
@@ -106,12 +187,24 @@ class OptimizedPricePredictionModel:
                  input_shape: Tuple[int, int],
                  model_type: str = "transformer_lstm",
                  use_mixed_precision: bool = True,
-                 use_xla: bool = True):
+                 use_xla: bool = True,
+                 scaler=None,
+                 feature_index: int = None,
+                 model_config: Dict = None):
         
         self.input_shape = input_shape
         self.model_type = model_type
         self.use_mixed_precision = use_mixed_precision
         self.use_xla = use_xla
+        self.scaler = scaler
+        self.feature_index = feature_index
+        
+        # Конфігурація моделі (якщо не передана - використовуємо дефолтну)
+        if model_config is None:
+            from optimized_config import MODEL_CONFIG
+            self.model_config = MODEL_CONFIG
+        else:
+            self.model_config = model_config
         
         # Налаштування GPU
         self._configure_gpu()
@@ -180,34 +273,51 @@ class OptimizedPricePredictionModel:
         return model
     
     def build_advanced_lstm_model(self) -> keras.Model:
-        """Покращена LSTM модель з attention"""
+        """Покращена LSTM модель з attention - використовує параметри з MODEL_CONFIG"""
         inputs = layers.Input(shape=self.input_shape)
+        
+        # Отримуємо параметри з конфігу
+        lstm_units_1 = self.model_config.get('lstm_units_1', 320)
+        lstm_units_2 = self.model_config.get('lstm_units_2', 160)
+        lstm_units_3 = self.model_config.get('lstm_units_3', 80)
+        attention_heads = self.model_config.get('attention_heads', 10)
+        attention_key_dim = self.model_config.get('attention_key_dim', 80)
+        dense_units = self.model_config.get('dense_units', [640, 320, 160, 80])
         
         # Нормалізація входу
         x = layers.LayerNormalization()(inputs)
         
-        # Багатошарові LSTM з residual connections
-        lstm1 = layers.LSTM(32, return_sequences=True, dropout=0.2, recurrent_dropout=0.1)(x)
+        # Багатошарові LSTM з residual connections та L2 регуляризацією
+        lstm1 = layers.LSTM(lstm_units_1, return_sequences=True, dropout=0.4, recurrent_dropout=0.3,
+                           kernel_regularizer=tf.keras.regularizers.l2(0.001))(x)
         lstm1_norm = layers.LayerNormalization()(lstm1)
         
-        lstm2 = layers.LSTM(16, return_sequences=True, dropout=0.2, recurrent_dropout=0.1)(lstm1_norm)
+        lstm2 = layers.LSTM(lstm_units_2, return_sequences=True, dropout=0.4, recurrent_dropout=0.3,
+                           kernel_regularizer=tf.keras.regularizers.l2(0.001))(lstm1_norm)
         lstm2_norm = layers.LayerNormalization()(lstm2)
         
-        # Attention механізм
-        attention = layers.MultiHeadAttention(num_heads=4, key_dim=64)(lstm2_norm, lstm2_norm)
+        lstm3 = layers.LSTM(lstm_units_3, return_sequences=True, dropout=0.4, recurrent_dropout=0.3,
+                           kernel_regularizer=tf.keras.regularizers.l2(0.001))(lstm2_norm)
+        lstm3_norm = layers.LayerNormalization()(lstm3)
+        
+        # Attention механізм з параметрами з конфігу
+        attention = layers.MultiHeadAttention(
+            num_heads=attention_heads, 
+            key_dim=attention_key_dim
+        )(lstm3_norm, lstm3_norm)
         attention = layers.Dropout(0.1)(attention)
         
         # Global pooling
         pooled = layers.GlobalAveragePooling1D()(attention)
         
-        # Dense блоки
-        x = layers.Dense(128, activation='relu')(pooled)
-        x = layers.BatchNormalization()(x)
-        x = layers.Dropout(0.3)(x)
-        
-        x = layers.Dense(64, activation='relu')(x)
-        x = layers.BatchNormalization()(x)
-        x = layers.Dropout(0.2)(x)
+        # Dense блоки з параметрами з конфігу та L2 регуляризацією
+        x = pooled
+        for i, units in enumerate(dense_units):
+            x = layers.Dense(units, activation='relu',
+                           kernel_regularizer=tf.keras.regularizers.l2(0.001))(x)
+            x = layers.BatchNormalization()(x)
+            dropout_rate = 0.5 if i == 0 else 0.4 if i == 1 else 0.3
+            x = layers.Dropout(dropout_rate)(x)
         
         outputs = layers.Dense(1, activation='linear', dtype='float32', name='output')(x)
         
@@ -280,9 +390,15 @@ class OptimizedPricePredictionModel:
         model.compile(
             optimizer=optimizer,
             loss='huber',  # Huber loss більш стійкий до викидів
-            metrics=['mae', mape, directional_accuracy],
+            metrics=['mae'],  # Тільки основна метрика для компактного виводу
             jit_compile=self.use_xla
         )
+        
+        # Зберігаємо додаткові метрики для використання у custom callbacks
+        self.additional_metrics = {
+            'mape': mape,
+            'directional_accuracy': directional_accuracy
+        }
         
         return model
     
@@ -373,7 +489,9 @@ class OptimizedPricePredictionModel:
                    model_save_path: str,
                    epochs: int = 200,
                    batch_size: int = 64,
-                   learning_rate: float = 0.001) -> Tuple[keras.Model, keras.callbacks.History]:
+                   learning_rate: float = 0.001,
+                   db_callback: callbacks.Callback = None,
+                   additional_callbacks: List[callbacks.Callback] = None) -> Tuple[keras.Model, keras.callbacks.History]:
         """Тренування моделі"""
         
         # Створення та компіляція моделі
@@ -388,6 +506,14 @@ class OptimizedPricePredictionModel:
         # Callback'и
         callback_list = self.get_callbacks(model_save_path)
         
+        # Додаємо DB callback якщо переданий
+        if db_callback is not None:
+            callback_list.append(db_callback)
+        
+        # Додаємо додаткові callback'и (наприклад, денормалізовані метрики)
+        if additional_callbacks is not None:
+            callback_list.extend(additional_callbacks)
+        
         # Тренування
         logger.info(f"🚀 Початок тренування моделі {self.model_type}")
         
@@ -396,7 +522,7 @@ class OptimizedPricePredictionModel:
             validation_data=val_dataset,
             epochs=epochs,
             callbacks=callback_list,
-            verbose=1
+            verbose=2  # Одна лінія на епоху
         )
         
         logger.info("✅ Тренування завершено")

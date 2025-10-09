@@ -81,3 +81,12 @@ demo_optimized.py
 db_utils.py
 base_main.py
 .gitignore
+logs
+models
+.sh
+.txt
+tests/metrics_analysis.py
+tests/test_scaler_simple.py
+tests/analyze_training_results.py
+tests/debug_scaler.py
+optimized_config.py
