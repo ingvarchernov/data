@@ -11,7 +11,8 @@ load_dotenv()
 async def save_ohlcv_to_db(db_manager, symbol: str, interval: str, days_back: int = 7):
     api_key = os.getenv('API_KEY')
     api_secret = os.getenv('API_SECRET')
-    data = get_historical_data(symbol, interval, days_back, api_key, api_secret)
+    # Використовуємо публічні дані за замовчуванням (без API ключів)
+    data = get_historical_data(symbol, interval, days_back, api_key, api_secret, use_public=True)
     if data.empty:
         logger.error(f"❌ Немає даних з Binance для {symbol} {interval}")
         return

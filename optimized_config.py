@@ -5,8 +5,8 @@
 
 SYMBOL = "BTCUSDT"
 INTERVAL = "1h"
-DAYS_BACK = 365  # 1 рік історії - баланс між обсягом та якістю валідації
-LOOK_BACK = 360  # 1 тиждень історії - оптимально для GPU
+DAYS_BACK = 90  # 3 місяці історії для кращого навчання моделі
+LOOK_BACK = 168  # 1 тиждень історії - оптимально для 90 днів даних
 STEPS = 5
 
 MODEL_CONFIG = {
@@ -35,7 +35,14 @@ INDICATORS_CONFIG = {
     "stoch_k": 14,
     "stoch_smooth_k": 3,
     "stoch_smooth_d": 3,
-    "atr_period": 14
+    "atr_period": 14,
+    "momentum_period": 10,  # Новий індикатор
+    "roc_period": 10,       # Rate of Change
+    "williams_r_period": 14,
+    "cci_period": 20,       # Commodity Channel Index
+    "trix_period": 15,      # Triple Exponential Average
+    "keltner_period": 20,   # Keltner Channels
+    "keltner_atr": 2.0
 }
 
 CACHE_CONFIG = {

@@ -11,15 +11,21 @@ logger = logging.getLogger(__name__)
 api_key = os.getenv('API_KEY')
 api_secret = os.getenv('API_SECRET')
 
-def get_historical_data(symbol, interval, days_back, api_key, api_secret):
+def get_historical_data(symbol, interval, days_back, api_key=None, api_secret=None, use_public=True):
     try:
-        exchange = ccxt.binance({
-            'apiKey': api_key,
-            'secret': api_secret,
-            'enableRateLimit': True
-        })
-        # Синхронізація часу з сервером Binance
-        exchange.load_time_difference()
+        # Якщо use_public=True, не використовуємо API ключі для публічних даних
+        exchange_config = {'enableRateLimit': True}
+        if not use_public and api_key and api_secret:
+            exchange_config.update({
+                'apiKey': api_key,
+                'secret': api_secret
+            })
+        
+        exchange = ccxt.binance(exchange_config)
+        
+        # Синхронізація часу з сервером Binance (тільки якщо є ключі)
+        if not use_public and api_key and api_secret:
+            exchange.load_time_difference()
         
         timeframe = interval
         interval_ms = get_interval_minutes(timeframe) * 60 * 1000

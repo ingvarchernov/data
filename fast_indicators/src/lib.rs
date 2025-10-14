@@ -181,6 +181,43 @@ fn fast_stochastic(
     ))
 }
 
+/// Fast Williams %R calculation
+#[pyfunction]
+fn fast_williams_r(
+    py: Python,
+    highs: PyReadonlyArray1<f64>,
+    lows: PyReadonlyArray1<f64>,
+    closes: PyReadonlyArray1<f64>,
+    period: usize,
+) -> PyResult<Py<PyArray1<f64>>> {
+    let highs = highs.as_slice()?;
+    let lows = lows.as_slice()?;
+    let closes = closes.as_slice()?;
+
+    if highs.len() != lows.len() || lows.len() != closes.len() || closes.len() < period {
+        return Ok(vec![].into_pyarray_bound(py).into());
+    }
+
+    let mut williams_r_values = Vec::new();
+
+    for i in (period - 1)..closes.len() {
+        let high_slice = &highs[(i + 1 - period)..=i];
+        let low_slice = &lows[(i + 1 - period)..=i];
+
+        let highest_high = high_slice.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let lowest_low = low_slice.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+
+        let r = if highest_high != lowest_low {
+            ((highest_high - closes[i]) / (highest_high - lowest_low)) * -100.0
+        } else {
+            -50.0
+        };
+        williams_r_values.push(r);
+    }
+
+    Ok(williams_r_values.into_pyarray_bound(py).into())
+}
+
 /// Fast EMA calculation
 #[pyfunction]
 fn fast_ema(py: Python, prices: PyReadonlyArray1<f64>, period: usize) -> PyResult<Py<PyArray1<f64>>> {
@@ -426,6 +463,7 @@ fn fast_indicators(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fast_macd, m)?)?;
     m.add_function(wrap_pyfunction!(fast_bollinger_bands, m)?)?;
     m.add_function(wrap_pyfunction!(fast_stochastic, m)?)?;
+    m.add_function(wrap_pyfunction!(fast_williams_r, m)?)?;
     m.add_function(wrap_pyfunction!(fast_ema, m)?)?;
     m.add_function(wrap_pyfunction!(fast_atr, m)?)?;
     m.add_function(wrap_pyfunction!(fast_cci, m)?)?;

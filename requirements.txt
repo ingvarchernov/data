@@ -27,6 +27,8 @@ polars>=0.18.0
 requests>=2.31.0
 python-binance>=1.0.16
 python-dotenv>=1.0.0
+beautifulsoup4>=4.12.0
+textblob>=0.17.1
 
 # System Monitoring
 psutil>=5.9.0

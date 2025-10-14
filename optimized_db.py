@@ -76,6 +76,9 @@ class OptimizedDatabaseManager:
                 raise ValueError(f"❌ Відсутні змінні середовища для підключення до БД: {missing}. Будь ласка, задайте їх у .env або через export.")
             db_url = f"postgresql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
         
+        # Зберігаємо db_url для використання в інших методах
+        self.db_url = db_url
+        
         # Синхронний engine
         self.sync_engine = create_engine(
             db_url,
@@ -125,9 +128,12 @@ class OptimizedDatabaseManager:
     def _load_table_metadata(self):
         """Завантаження метаданих таблиць (lazy loading)"""
         try:
-            # Не завантажуємо метадані відразу при імпорті
-            # Це буде зроблено при першому використанні
-            pass
+            # Завантажуємо метадані всіх таблиць з бази даних
+            from sqlalchemy import create_engine
+            sync_engine = create_engine(self.db_url.replace("postgresql+asyncpg://", "postgresql://"))
+            with sync_engine.connect() as conn:
+                self.metadata.reflect(bind=conn)
+            logger.info(f"✅ Завантажено метадані {len(self.metadata.tables)} таблиць")
         except Exception as e:
             logger.error(f"❌ Помилка ініціалізації метаданих: {e}")
     
@@ -426,3 +432,160 @@ def insert_symbol(symbol: str) -> int:
 def insert_interval(interval: str) -> int:
     """Синхронна обгортка для вставки інтервалу"""
     return asyncio.run(get_or_create_interval_id(interval))
+
+async def save_technical_indicators_batch(db_manager, symbol: str, interval: str, df_with_indicators: pd.DataFrame):
+    """Збереження технічних індикаторів в базу даних"""
+    if df_with_indicators.empty:
+        return
+    
+    try:
+        # Отримуємо ID символу та інтервалу
+        symbol_id = await db_manager.get_or_create_symbol_id(symbol)
+        interval_id = await db_manager.get_or_create_interval_id(interval)
+        
+        # Підготовка даних для вставки
+        indicators_data = []
+        for idx, row in df_with_indicators.iterrows():
+            # Припускаємо, що df має колонку data_id або timestamp
+            # Якщо немає data_id, знаходимо його по timestamp
+            if 'data_id' not in row:
+                # Шукаємо data_id по timestamp
+                query = """
+                SELECT data_id FROM historical_data 
+                WHERE symbol_id = :symbol_id AND interval_id = :interval_id 
+                AND timestamp = :timestamp
+                """
+                result = await db_manager.execute_query_cached(
+                    query, 
+                    {'symbol_id': symbol_id, 'interval_id': interval_id, 'timestamp': row['timestamp']}, 
+                    use_cache=False
+                )
+                if result.empty:
+                    continue
+                data_id = int(result.iloc[0]['data_id'])
+            else:
+                data_id = int(row['data_id'])
+            
+            # Формуємо запис для technical_indicators
+            indicator_record = {
+                'data_id': data_id,
+                'rsi': float(row.get('rsi', None)) if pd.notna(row.get('rsi')) else None,
+                'macd': float(row.get('macd', None)) if pd.notna(row.get('macd')) else None,
+                'macd_signal': float(row.get('macd_signal', None)) if pd.notna(row.get('macd_signal')) else None,
+                'upper_band': float(row.get('upper_band', None)) if pd.notna(row.get('upper_band')) else None,
+                'lower_band': float(row.get('lower_band', None)) if pd.notna(row.get('lower_band')) else None,
+                'stoch': float(row.get('stoch', None)) if pd.notna(row.get('stoch')) else None,
+                'stoch_signal': float(row.get('stoch_signal', None)) if pd.notna(row.get('stoch_signal')) else None,
+                'ema': float(row.get('ema', None)) if pd.notna(row.get('ema')) else None,
+                'atr': float(row.get('atr', None)) if pd.notna(row.get('atr')) else None,
+                'cci': float(row.get('cci', None)) if pd.notna(row.get('cci')) else None,
+                'obv': float(row.get('obv', None)) if pd.notna(row.get('obv')) else None,
+                'volatility': float(row.get('volatility', None)) if pd.notna(row.get('volatility')) else None,
+                'volume_pct': float(row.get('volume_pct', None)) if pd.notna(row.get('volume_pct')) else None,
+                'close_lag1': float(row.get('close_lag1', None)) if pd.notna(row.get('close_lag1')) else None,
+                'close_lag2': float(row.get('close_lag2', None)) if pd.notna(row.get('close_lag2')) else None,
+                'close_diff': float(row.get('close_diff', None)) if pd.notna(row.get('close_diff')) else None,
+                'log_return': float(row.get('log_return', None)) if pd.notna(row.get('log_return')) else None,
+                'hour_norm': float(row.get('hour_norm', None)) if pd.notna(row.get('hour_norm')) else None,
+                'day_norm': float(row.get('day_norm', None)) if pd.notna(row.get('day_norm')) else None,
+                'adx': float(row.get('adx', None)) if pd.notna(row.get('adx')) else None,
+                'vwap': float(row.get('vwap', None)) if pd.notna(row.get('vwap')) else None
+            }
+            indicators_data.append(indicator_record)
+        
+        # Пакетна вставка з upsert
+        if indicators_data:
+            await db_manager.batch_upsert('technical_indicators', indicators_data, ['data_id'])
+            logger.info(f"✅ Збережено {len(indicators_data)} технічних індикаторів для {symbol} {interval}")
+    
+    except Exception as e:
+        logger.error(f"❌ Помилка збереження технічних індикаторів: {e}")
+
+async def save_normalized_data_batch(db_manager, symbol: str, interval: str, normalized_df: pd.DataFrame):
+    """Збереження нормалізованих даних в базу даних"""
+    if normalized_df.empty:
+        logger.warning("⚠️ normalized_df порожній")
+        return
+    
+    logger.info(f"🔢 Спроба зберегти нормалізовані дані: {len(normalized_df)} рядків, колонки: {list(normalized_df.columns)}")
+    
+    try:
+        # Отримуємо ID символу та інтервалу
+        symbol_id = await db_manager.get_or_create_symbol_id(symbol)
+        interval_id = await db_manager.get_or_create_interval_id(interval)
+        
+        # Підготовка даних для вставки
+        normalized_data = []
+        saved_count = 0
+        
+        for idx, row in normalized_df.iterrows():
+            # Знаходимо data_id по timestamp
+            timestamp = row.get('timestamp')
+            if timestamp is None or pd.isna(timestamp):
+                logger.warning(f"⚠️ Пропускаємо рядок {idx}: відсутній timestamp")
+                continue
+                
+            query = """
+            SELECT data_id FROM historical_data 
+            WHERE symbol_id = :symbol_id AND interval_id = :interval_id 
+            AND timestamp = :timestamp
+            """
+            result = await db_manager.execute_query_cached(
+                query, 
+                {'symbol_id': symbol_id, 'interval_id': interval_id, 'timestamp': timestamp}, 
+                use_cache=False
+            )
+            if result.empty:
+                logger.warning(f"⚠️ Не знайдено data_id для timestamp {timestamp}")
+                continue
+            data_id = int(result.iloc[0]['data_id'])
+            
+            # Зберігаємо всі числові колонки як нормалізовані дані
+            for col in normalized_df.columns:
+                if col != 'timestamp' and col.endswith('_normalized') and pd.notna(row[col]):
+                    normalized_data.append({
+                        'data_id': data_id,
+                        'feature': col.replace('_normalized', ''),  # Зберігаємо назву без _normalized
+                        'normalized_value': float(row[col])
+                    })
+                    saved_count += 1
+        
+        # Пакетна вставка
+        if normalized_data:
+            await db_manager.batch_upsert('normalized_data', normalized_data, ['data_id', 'feature'])
+            logger.info(f"✅ Збережено {len(normalized_data)} нормалізованих значень для {symbol} {interval} (з {saved_count} кандидатів)")
+        else:
+            logger.warning("⚠️ Немає даних для збереження в normalized_data")
+    
+    except Exception as e:
+        logger.error(f"❌ Помилка збереження нормалізованих даних: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+async def save_predictions(db_manager, symbol: str, interval: str, predictions: List[float], last_price: float):
+    """Збереження прогнозів в базу даних"""
+    try:
+        # Отримуємо ID символу та інтервалу
+        symbol_id = await db_manager.get_or_create_symbol_id(symbol)
+        interval_id = await db_manager.get_or_create_interval_id(interval)
+        
+        # Створюємо запис прогнозу
+        prediction_record = {
+            'symbol_id': symbol_id,
+            'interval_id': interval_id,
+            'timestamp': datetime.now(),
+            'last_price': float(last_price),
+            'predicted_price': float(predictions[0]) if predictions else None,
+            'fold_1_prediction': float(predictions[0]) if len(predictions) > 0 else None,
+            'fold_2_prediction': float(predictions[1]) if len(predictions) > 1 else None,
+            'fold_3_prediction': float(predictions[2]) if len(predictions) > 2 else None,
+            'fold_4_prediction': float(predictions[3]) if len(predictions) > 3 else None,
+            'fold_5_prediction': float(predictions[4]) if len(predictions) > 4 else None
+        }
+        
+        # Вставка з upsert (якщо вже є прогноз на цю мить, оновлюємо)
+        await db_manager.batch_upsert('predictions', [prediction_record], ['symbol_id', 'interval_id', 'timestamp'])
+        logger.info(f"✅ Збережено прогноз для {symbol} {interval}: {predictions[0]:.2f}")
+    
+    except Exception as e:
+        logger.error(f"❌ Помилка збереження прогнозів: {e}")

@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Оптимізований головний модуль з новою архітектурою
+Оптимізований головний модуль з новою архі        # Ініціалізація кешу
+        cache_stats = get_cache_info()
+        logger.info(f"💾 Кеш ініціалізовано: {cache_stats['memory_cache_size']} MB пам'яті, {cache_stats['redis_keys']} ключів")турою
 Інтегрує всі оптимізації: асинхронність, кешування, GPU, Rust індикатори
 """
 import numpy as np
@@ -9,21 +11,24 @@ import asyncio
 import logging
 import sys
 import os
+import time
 import argparse
 from binance_loader import save_ohlcv_to_db
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # Системні модулі
 from dotenv import load_dotenv
 
 # Оптимізовані модулі
-from optimized_db import db_manager
+from optimized_db import db_manager, save_technical_indicators_batch, save_normalized_data_batch, save_predictions
 from optimized_indicators import global_calculator
 from optimized_model import OptimizedPricePredictionModel, DatabaseHistoryCallback, DenormalizedMetricsCallback
 from cache_system import cache_manager, get_cache_info
 from async_architecture import ml_pipeline, init_async_system, shutdown_async_system
 from gpu_config import configure_gpu, get_gpu_info
+from monitoring_system import monitoring_system
+from fundamental_integrator import fundamental_integrator
 # Використовуємо optimized_config замість config
 from optimized_config import SYMBOL, INTERVAL, DAYS_BACK, LOOK_BACK, STEPS, MODEL_CONFIG
 
@@ -60,24 +65,29 @@ class OptimizedCryptoMLSystem:
         self.gpu_available = configure_gpu()
         if self.gpu_available:
             gpu_info = get_gpu_info()
-            logger.info(f"🔥 GPU статус: {gpu_info}")
-        
+            logger.info(f"✅ GPU доступний: {len(gpu_info['details'])} пристроїв")
+
         # Ініціалізація асинхронної системи
         await init_async_system()
-        
+
         # Ініціалізація кешу
-        logger.info("💾 Ініціалізація системи кешування...")
         cache_stats = get_cache_info()
-        logger.info(f"📊 Статистика кешу: {cache_stats}")
-        
+        logger.info(f"� Кеш ініціалізовано: {cache_stats['memory_cache_size']} MB пам'яті, {cache_stats['redis_keys']} ключів")
+
         # Тестування з'єднання з БД
         try:
             await db_manager.execute_query_cached("SELECT 1 as test", use_cache=False)
-            logger.info("✅ З'єднання з базою даних успішне")
+            logger.info("✅ База даних підключена")
         except Exception as e:
             logger.error(f"❌ Помилка з'єднання з БД: {e}")
             raise
-        
+
+        # Ініціалізація моніторингу та фундаментальних даних
+        monitoring_system.db_manager = db_manager
+        fundamental_integrator.db_manager = db_manager
+        fundamental_integrator.cache_manager = cache_manager
+        await fundamental_integrator.initialize()
+
         self.initialized = True
         logger.info("✅ Система ініціалізована успішно")
     
@@ -97,7 +107,8 @@ class OptimizedCryptoMLSystem:
                                      look_back: int,
                                      steps: int,
                                      force_retrain: bool = False,
-                                     use_cv: bool = False):
+                                     use_cv: bool = False,
+                                     model_type: str = "advanced_lstm"):
         """Оптимізована обробка символу"""
         logger.info(f"📈 Початок обробки {symbol} ({interval})")
         start_time = datetime.now()
@@ -140,11 +151,20 @@ class OptimizedCryptoMLSystem:
                     data[col] = original_ohlcv[col]
             
             # Очищення від NaN
+            initial_count = len(data)
             data = data.dropna()
-            logger.info(f"✓ Обробка даних: {len(data)} записів після індикаторів")
-            logger.info(f"📊 Після додавання індикаторів: {len(data)} записів")
+            if len(data) < initial_count:
+                logger.info(f"🧹 Видалено NaN: {initial_count} → {len(data)} записів")
+            else:
+                logger.info(f"✓ Дані без NaN: {len(data)} записів")
+
+            # ДОДАВАННЯ ДОДАТКОВИХ СТАТИСТИЧНИХ ФІЧЕЙ
+            # ...existing code...
             
             # ВИДАЛЕННЯ OUTLIERS - критичний крок для якості даних
+            outliers_start = len(data)
+            logger.info(f"🔍 Видалення outliers з {outliers_start} записів...")
+
             # Видаляємо екстремальні значення цін (більше 10 стандартних відхилень)
             price_cols = ['close', 'high', 'low', 'open']
             for col in price_cols:
@@ -153,13 +173,13 @@ class OptimizedCryptoMLSystem:
                     std_price = data[col].std()
                     # Видаляємо значення, які відхиляються більше ніж на 5 стандартних відхилень
                     data = data[abs(data[col] - mean_price) <= 5 * std_price]
-            
+
             # Видаляємо екстремальні об'єми (більше 10 стандартних відхилень)
             if 'volume' in data.columns:
                 vol_mean = data['volume'].mean()
                 vol_std = data['volume'].std()
                 data = data[abs(data['volume'] - vol_mean) <= 10 * vol_std]
-            
+
             # Видаляємо екстремальні значення індикаторів
             indicator_cols = ['RSI', 'MACD', 'ATR', 'Stoch_K', 'Stoch_D', 'Williams_R', 'CCI', 'ADX']
             for col in indicator_cols:
@@ -176,8 +196,12 @@ class OptimizedCryptoMLSystem:
                         col_mean = data[col].mean()
                         col_std = data[col].std()
                         data = data[abs(data[col] - col_mean) <= 5 * col_std]
-            
-            logger.info(f"✓ Після видалення outliers: {len(data)} записів")
+
+            outliers_removed = outliers_start - len(data)
+            if outliers_removed > 0:
+                logger.info(f"🧹 Видалено outliers: {outliers_start} → {len(data)} записів (-{outliers_removed})")
+            else:
+                logger.info(f"✓ Outliers не знайдено: {len(data)} записів")
             
             if len(data) < look_back:
                 logger.error(f"❌ Недостатньо даних після обробки: {len(data)} < {look_back}")
@@ -234,9 +258,17 @@ class OptimizedCryptoMLSystem:
             
             # Time-based features (якщо є timestamp)
             if 'timestamp' in data.columns:
-                data['hour'] = pd.to_datetime(data['timestamp']).dt.hour
-                data['day_of_week'] = pd.to_datetime(data['timestamp']).dt.dayofweek
-                data['month'] = pd.to_datetime(data['timestamp']).dt.month
+                # Конвертуємо timestamp правильно (Unix timestamp в мілісекундах)
+                # Перевіряємо тільки якщо це числа
+                if pd.api.types.is_numeric_dtype(data['timestamp']):
+                    if data['timestamp'].max() > 1e10:  # Мілісекунди
+                        data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
+                    else:  # Секунди або вже datetime
+                        data['timestamp'] = pd.to_datetime(data['timestamp'])
+                
+                data['hour'] = data['timestamp'].dt.hour
+                data['day_of_week'] = data['timestamp'].dt.dayofweek
+                data['month'] = data['timestamp'].dt.month
                 # Циклічні features для часу
                 data['hour_sin'] = np.sin(2 * np.pi * data['hour'] / 24)
                 data['hour_cos'] = np.cos(2 * np.pi * data['hour'] / 24)
@@ -284,6 +316,9 @@ class OptimizedCryptoMLSystem:
             ]
             feature_columns = [f for f in strategic_features if f in data.columns]
             
+            # Логування після визначення фічей
+            logger.info(f"📊 Фінальний датасет: {len(data)} записів, {len(feature_columns)} фічей")
+            
             # Видаляємо NaN після lag-фічей та перевіряємо на Inf
             data = data.replace([np.inf, -np.inf], np.nan)
             data = data.dropna()
@@ -292,7 +327,66 @@ class OptimizedCryptoMLSystem:
                 logger.error(f"❌ Недостатньо даних після обробки: {len(data)} < {look_back}")
                 return None
             
-            logger.info(f"✓ Фінальний датасет: {len(data)} записів, {len(feature_columns)} фічей")
+            logger.info(f"📊 Фінальний датасет: {len(data)} записів, {len(feature_columns)} фічей")
+            
+            # ЗБІР ФУНДАМЕНТАЛЬНИХ ДАНИХ
+            fundamental_start = len(feature_columns)
+            logger.info(f"📰 Збір фундаментальних даних для {symbol}...")
+            try:
+                # Встановлюємо timestamp як індекс для технічних даних
+                if 'timestamp' in data.columns:
+                    data.set_index('timestamp', inplace=True)
+                    logger.info(f"📅 Встановлено timestamp як індекс для {len(data)} записів")
+                
+                # Отримуємо період даних для збору фундаментальних даних
+                data_start_time = data.index.min()
+                data_end_time = data.index.max()
+                hours_back = int((data_end_time - data_start_time).total_seconds() / 3600)
+                
+                # Збираємо фундаментальні дані за період технічних даних
+                fundamental_data = await fundamental_integrator.collect_fundamental_data_for_period(
+                    symbol, data_start_time, data_end_time
+                )
+                
+                if fundamental_data:
+                    logger.info(f"📊 Зібрано {len(fundamental_data)} фундаментальних записів")
+                    
+                    # Отримуємо фундаментальні ознаки для періоду даних
+                    start_time = data.index.min()
+                    end_time = data.index.max()
+                    
+                    fundamental_df = await fundamental_integrator.get_fundamental_features(
+                        symbol, start_time, end_time
+                    )
+                    
+                    if not fundamental_df.empty:
+                        # Комбінуємо технічні та фундаментальні дані
+                        data = fundamental_integrator.combine_with_technical_data(data, fundamental_df)
+                        logger.info(f"🔗 Поєднано технічні та фундаментальні дані: {len(data)} записів")
+                        
+                        # Оновлюємо feature_columns з фундаментальними ознаками
+                        fundamental_features = [
+                            'aggregate_sentiment', 'news_sentiment_score', 'social_sentiment_score',
+                            'active_addresses', 'transaction_count', 'whale_activity'
+                        ]
+                        feature_columns.extend([f for f in fundamental_features if f in data.columns])
+                        
+                        features_added = len(feature_columns) - fundamental_start
+                        logger.info(f"📊 Фундаментальні фічі: {fundamental_start} → {len(feature_columns)} (+{features_added})")
+                    else:
+                        logger.warning(f"⚠️ Немає фундаментальних даних для {symbol} в періоді {start_time} - {end_time}")
+                else:
+                    logger.warning(f"⚠️ Не вдалося зібрати фундаментальні дані для {symbol}")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Помилка збору фундаментальних даних: {e}")
+                # Продовжуємо без фундаментальних даних
+            
+            # ЗБЕРЕЖЕННЯ ТЕХНІЧНИХ ІНДИКАТОРІВ В БД
+            try:
+                await save_technical_indicators_batch(db_manager, symbol, interval, data)
+            except Exception as e:
+                logger.warning(f"⚠️ Не вдалося зберегти технічні індикатори: {e}")
             
             # Time-series validation: використовуємо СЕРЕДНІ 20% як валідацію (не останні!)
             # Для фінансових даних краще використовувати дані з середини періоду
@@ -329,7 +423,43 @@ class OptimizedCryptoMLSystem:
                 X_train_sequences.append(X_train_scaled[i:i + look_back])
             X_train_sequences = np.array(X_train_sequences)
             
-            # Створення послідовностей для val
+            # Data Augmentation для покращення генералізації
+            def augment_training_data(X_sequences, y_targets, augmentation_factor=2):
+                """Додаємо шум та невеликі perturbation до тренувальних даних"""
+                augmented_sequences = [X_sequences]
+                augmented_targets = [y_targets]
+                
+                for _ in range(augmentation_factor - 1):
+                    # Додаємо гаусівський шум (0.5% від std кожного feature)
+                    noise = np.random.normal(0, 0.005, X_sequences.shape)
+                    noisy_sequences = X_sequences + noise * np.std(X_sequences, axis=(0, 1), keepdims=True)
+                    
+                    # Невеликі часові зсуви (1-2 кроки)
+                    shift_amount = np.random.randint(-1, 2, size=X_sequences.shape[0])  # -1, 0, або 1
+                    
+                    shifted_sequences = np.zeros_like(X_sequences)
+                    for i, shift in enumerate(shift_amount):
+                        if shift > 0:
+                            shifted_sequences[i, shift:] = noisy_sequences[i, :-shift]
+                            shifted_sequences[i, :shift] = noisy_sequences[i, 0]  # повторюємо перший елемент
+                        elif shift < 0:
+                            shifted_sequences[i, :shift] = noisy_sequences[i, -shift:]
+                            shifted_sequences[i, shift:] = noisy_sequences[i, -1]  # повторюємо останній елемент
+                        else:
+                            shifted_sequences[i] = noisy_sequences[i]
+                    
+                    augmented_sequences.append(shifted_sequences)
+                    augmented_targets.append(y_targets)  # цілі залишаються ті ж
+                
+                # Об'єднуємо всі augmented дані
+                X_augmented = np.concatenate(augmented_sequences, axis=0)
+                y_augmented = np.concatenate(augmented_targets, axis=0)
+                
+                # Перемішуємо
+                indices = np.random.permutation(len(X_augmented))
+                return X_augmented[indices], y_augmented[indices]
+            
+            # Створення послідовностей для val (без augmentation)
             X_val_sequences = []
             for i in range(len(X_val_scaled) - look_back):
                 X_val_sequences.append(X_val_scaled[i:i + look_back])
@@ -340,28 +470,37 @@ class OptimizedCryptoMLSystem:
             y_train = X_train_scaled[look_back:, close_idx]  # наступні абсолютні ціни
             y_val = X_val_scaled[look_back:, close_idx]
 
-            # Перевіряємо, чи співпадають розміри
-            expected_train_len = len(X_train_scaled) - look_back
-            expected_val_len = len(X_val_scaled) - look_back
+            # Застосовуємо augmentation тільки до тренувальних даних
+            X_train_sequences, y_train = augment_training_data(X_train_sequences, y_train, augmentation_factor=3)
+            logger.info(f"🔄 Data augmentation: {len(X_train_sequences)} тренувальних семплів (було {len(X_train_scaled) - look_back})")
 
-            if len(y_train) != expected_train_len or len(y_val) != expected_val_len:
-                logger.error(f"❌ Розмірність y не співпадає: y_train={len(y_train)}, expected={expected_train_len}")
-                return None
-            
-            # Перевіряємо, чи співпадають розміри
-            expected_train_len = len(X_train_scaled) - look_back
+            # Перевіряємо, чи співпадають розміри після augmentation
+            expected_train_len = len(X_train_sequences)
             expected_val_len = len(X_val_scaled) - look_back
             
             if len(y_train) != expected_train_len or len(y_val) != expected_val_len:
                 logger.error(f"❌ Розмірність y не співпадає: y_train={len(y_train)}, expected={expected_train_len}")
                 return None
             
-            X_sequences = X_train_sequences  # Для сумісності з наступним кодом
+            X_sequences = X_train_sequences  # Для сумісності з наступним кодом            X_sequences = X_train_sequences  # Для сумісності з наступним кодом
             
             # Для prediction потрібні всі дані разом
             X_data = data[feature_columns].values
             X_all_scaled = scaler.transform(X_data)  # transform використовуючи train scaler
-
+            
+            # ЗБЕРЕЖЕННЯ НОРМАЛІЗОВАНИХ ДАНИХ В БД
+            try:
+                # Створюємо DataFrame з нормалізованими даними для збереження
+                normalized_data_df = data.reset_index().copy()  # reset_index щоб timestamp став колонкою
+                
+                # Додаємо нормалізовані значення як нові колонки
+                for i, feature in enumerate(feature_columns):
+                    normalized_data_df[f'{feature}_normalized'] = X_all_scaled[:, i]
+                
+                await save_normalized_data_batch(db_manager, symbol, interval, normalized_data_df)
+            except Exception as e:
+                logger.warning(f"⚠️ Не вдалося зберегти нормалізовані дані: {e}")
+            
             if len(X_sequences) == 0:
                 logger.error("❌ Не вдалося створити послідовності")
                 return None
@@ -389,7 +528,7 @@ class OptimizedCryptoMLSystem:
                 
                 model_builder = OptimizedPricePredictionModel(
                     input_shape=(look_back, len(feature_columns)),
-                    model_type="advanced_lstm",
+                    model_type=model_type,
                     scaler=scaler,
                     feature_index=close_index
                 )
@@ -429,6 +568,7 @@ class OptimizedCryptoMLSystem:
                 )
                 
                 # Використовуємо параметри з optimized_config
+                start_training_time = time.time()
                 model, history = model_builder.train_model(
                     X_train, y_train, X_val, y_val,
                     model_save_path=model_path,
@@ -437,6 +577,16 @@ class OptimizedCryptoMLSystem:
                     learning_rate=MODEL_CONFIG['learning_rate'],
                     db_callback=db_callback,
                     additional_callbacks=[denorm_callback]
+                )
+                training_time = time.time() - start_training_time
+                
+                # Записуємо метрики моделі в систему моніторингу
+                monitoring_system.record_model_metrics(
+                    symbol=symbol,
+                    interval=interval,
+                    model_type=model_type,
+                    training_time=training_time,
+                    history=history
                 )
                 # Зберігаємо метадані з параметрами scaler
                 scaler_params = {}
@@ -463,18 +613,18 @@ class OptimizedCryptoMLSystem:
                     'scaler_params': scaler_params,
                     'trained_at': datetime.now().isoformat(),
                     'data_shape': X_sequences.shape,
-                    'model_type': 'advanced_lstm'
+                    'model_type': model_type
                 }
                 model_builder.save_model_with_metadata(model, model_path, metadata)
             else:
                 logger.info("📥 Завантаження існуючої моделі...")
                 model_builder = OptimizedPricePredictionModel(
                     input_shape=(look_back, len(feature_columns)),
-                    model_type="advanced_lstm",
+                    model_type=model_type,
                     scaler=scaler,
                     feature_index=feature_columns.index('close')
                 )
-                model = model_builder.load_model_with_custom_objects(model_path)
+                model = model_builder.load_model_with_metadata(model_path)
                 
                 # Якщо модель завантажена без компіляції, перекомпілюємо її
                 if not model.compiled:
@@ -483,6 +633,71 @@ class OptimizedCryptoMLSystem:
             
             # 5. Прогнозування
             logger.info("🔮 Генерація прогнозів...")
+            
+            # ЗБІР СВІЖИХ ФУНДАМЕНТАЛЬНИХ ДАНИХ ДЛЯ ПРОГНОЗУВАННЯ
+            logger.info(f"📰 Збір свіжих фундаментальних даних для прогнозу {symbol}...")
+            try:
+                # Збираємо свіжі фундаментальні дані (останні 24 години)
+                fresh_fundamental_list = await fundamental_integrator.collect_fundamental_data_for_period(
+                    symbol, 
+                    datetime.now() - timedelta(hours=24), 
+                    datetime.now()
+                )
+                
+                if fresh_fundamental_list:
+                    # Конвертуємо список в DataFrame для обробки
+                    fresh_fundamental_data = []
+                    for feature in fresh_fundamental_list:
+                        fresh_fundamental_data.append({
+                            'timestamp': feature.timestamp,
+                            'aggregate_sentiment': feature.aggregate_sentiment,
+                            'news_sentiment_score': feature.news_sentiment_score,
+                            'social_sentiment_score': feature.social_sentiment_score,
+                            'active_addresses': feature.active_addresses,
+                            'transaction_count': feature.transaction_count,
+                            'whale_activity': feature.whale_activity
+                        })
+                    
+                    latest_fundamental = pd.DataFrame(fresh_fundamental_data)
+                    
+                    if not latest_fundamental.empty:
+                        # Покращена обробка фундаментальних даних з часовою інтерполяцією
+                        fundamental_features = ['aggregate_sentiment', 'news_sentiment_score', 'social_sentiment_score',
+                                              'active_addresses', 'transaction_count', 'whale_activity']
+                        
+                        # Створюємо часову сітку для останніх look_back періодів
+                        last_timestamps = data.index[-look_back:]
+                        
+                        # Інтерполюємо фундаментальні дані по часу
+                        for feature in fundamental_features:
+                            if feature in data.columns and feature in latest_fundamental.columns:
+                                # Використовуємо resample та interpolate для плавного переходу
+                                feature_series = latest_fundamental.set_index('timestamp')[feature]
+                                
+                                # Створюємо серію з тими ж timestamp що й останні дані
+                                interpolated_feature = feature_series.reindex(last_timestamps, method='ffill').fillna(method='bfill').fillna(0.0)
+                                
+                                # Додаємо невеликий шум для реалістичності (але менший ніж в тренуванні)
+                                noise_level = 0.001  # 0.1% шум
+                                noise = np.random.normal(0, noise_level * interpolated_feature.std(), len(interpolated_feature))
+                                interpolated_feature = interpolated_feature + noise
+                                
+                                # Оновлюємо дані
+                                data.loc[last_timestamps, feature] = interpolated_feature.values
+                        
+                        # Перераховуємо нормалізовані дані з оновленими фундаментальними ознаками
+                        X_data_updated = data[feature_columns].values
+                        X_all_scaled = scaler.transform(X_data_updated)
+                        
+                        logger.info(f"🔄 Оновлено дані інтерпольованими фундаментальними ознаками з часовою сіткою")
+                    else:
+                        logger.warning(f"⚠️ Немає свіжих фундаментальних даних для прогнозу")
+                else:
+                    logger.warning(f"⚠️ Не вдалося зібрати свіжі фундаментальні дані")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Помилка збору свіжих фундаментальних даних: {e}")
+                # Продовжуємо з існуючими даними
             
             # Беремо останні дані для прогнозування
             last_sequence = X_all_scaled[-look_back:].reshape(1, look_back, len(feature_columns))
@@ -529,8 +744,22 @@ class OptimizedCryptoMLSystem:
             cache_key = f"predictions:{symbol}:{interval}:{steps}"
             cache_manager.set(cache_key, results, ttl=1800)
             
-            logger.info(f"✅ Обробку завершено за {results['processing_time']:.2f}s")
-            logger.info(f"📈 Остання ціна: {results['last_price']:.2f}")
+            # ЗБЕРЕЖЕННЯ ПРОГНОЗІВ В БД
+            try:
+                await save_predictions(db_manager, symbol, interval, predictions_denorm, last_price_denorm)
+            except Exception as e:
+                logger.warning(f"⚠️ Не вдалося зберегти прогнози: {e}")
+            
+            # Записуємо метрики прогнозів в систему моніторингу
+            for i, predicted_price in enumerate(predictions_denorm):
+                monitoring_system.record_prediction_metrics(
+                    symbol=symbol,
+                    interval=interval,
+                    predicted_price=predicted_price,
+                    actual_price=last_price_denorm,  # Використовуємо останню відому ціну як базову
+                    confidence_score=None
+                )
+            
             logger.info(f"🔮 Прогнози: {[f'{p:.2f}' for p in predictions_denorm]}")
             
             return results
@@ -539,14 +768,14 @@ class OptimizedCryptoMLSystem:
             logger.error(f"❌ Помилка обробки {symbol}: {e}", exc_info=True)
             return None
     
-    async def batch_process_symbols(self, symbols: list, **kwargs):
+    async def batch_process_symbols(self, symbols: list, model_type: str = "advanced_lstm", **kwargs):
         """Пакетна обробка символів"""
-        logger.info(f"🔄 Пакетна обробка {len(symbols)} символів")
+        logger.info(f"🔄 Пакетна обробка {len(symbols)} символів з моделлю {model_type}")
         
         # Створюємо задачі для паралельного виконання
         tasks = []
         for symbol in symbols:
-            task = self.process_symbol_optimized(symbol, **kwargs)
+            task = self.process_symbol_optimized(symbol, model_type=model_type, **kwargs)
             tasks.append(task)
         
         # Виконуємо паралельно з обмеженням
@@ -575,6 +804,8 @@ class OptimizedCryptoMLSystem:
             'gpu_info': get_gpu_info() if self.gpu_available else None,
             'cache_stats': get_cache_info(),
             'worker_stats': ml_pipeline.worker_pool.get_stats() if ml_pipeline.worker_pool else None,
+            'monitoring_status': monitoring_system.get_system_status(),
+            'performance_summary': monitoring_system.get_performance_summary(),
             'timestamp': datetime.now().isoformat()
         }
     
@@ -598,6 +829,8 @@ async def main():
     parser.add_argument("--force_retrain", action="store_true", help="Примусове перетренування")
     parser.add_argument("--use_cv", action="store_true", help="Використати TimeSeriesSplit cross-validation")
     parser.add_argument("--batch", nargs="+", help="Пакетна обробка символів")
+    parser.add_argument("--symbols", nargs="+", default=[SYMBOL], help="Список символів для обробки")
+    parser.add_argument("--model_type", type=str, default="advanced_lstm", choices=["advanced_lstm", "transformer", "cnn_lstm"], help="Тип моделі")
     parser.add_argument("--status", action="store_true", help="Показати статус системи")
     
     args = parser.parse_args()
@@ -606,10 +839,15 @@ async def main():
         # Ініціалізація системи
         await crypto_system.initialize()
 
-        # Автоматичне завантаження історичних даних з Binance
+        # Запуск системи моніторингу
+        monitoring_task = asyncio.create_task(monitoring_system.start_monitoring(interval_seconds=60))
+        logger.info("📊 Система моніторингу запущена")
+
+        # Автоматичне завантаження історичних даних з Binance для всіх символів
         logger.info("⏳ Завантаження історичних даних з Binance...")
-        await save_ohlcv_to_db(db_manager, args.symbol, args.interval, days_back=args.days_back)
-        logger.info("✅ Дані з Binance завантажено у historical_data")
+        for symbol in args.symbols:
+            await save_ohlcv_to_db(db_manager, symbol, args.interval, days_back=args.days_back)
+        logger.info(f"✅ Дані з Binance завантажено у historical_data для {len(args.symbols)} символів")
 
         if args.status:
             # Показати статус
@@ -626,7 +864,8 @@ async def main():
                 look_back=args.look_back,
                 steps=args.steps,
                 force_retrain=args.force_retrain,
-                use_cv=args.use_cv
+                use_cv=args.use_cv,
+                model_type=args.model_type
             )
             
             for i, result in enumerate(results):
@@ -635,29 +874,63 @@ async def main():
                 elif result:
                     logger.info(f"✅ {args.batch[i]}: {result['predictions']}")
         else:
-            # Обробка одного символу
-            result = await crypto_system.process_symbol_optimized(
-                symbol=args.symbol,
-                interval=args.interval,
-                days_back=args.days_back,
-                look_back=args.look_back,
-                steps=args.steps,
-                force_retrain=args.force_retrain,
-                use_cv=args.use_cv
-            )
+            # Обробка всіх символів з --symbols
+            all_results = []
+            for symbol in args.symbols:
+                logger.info(f"📊 Обробка символу: {symbol}")
+                result = await crypto_system.process_symbol_optimized(
+                    symbol=symbol,
+                    interval=args.interval,
+                    days_back=args.days_back,
+                    look_back=args.look_back,
+                    steps=args.steps,
+                    force_retrain=args.force_retrain,
+                    use_cv=args.use_cv,
+                    model_type=args.model_type
+                )
+                
+                if result:
+                    all_results.append(result)
+                    predictions = result['predictions']
+                    if predictions:
+                        last_price = result.get('last_price', 0)
+                        first_pred = predictions[0]
+                        if last_price > 0:
+                            price_error_pct = ((first_pred - last_price) / last_price) * 100
+                            error_sign = "+" if price_error_pct >= 0 else ""
+                            logger.info(f"✅ {symbol}: Прогноз {first_pred:.2f} ({error_sign}{price_error_pct:.2f}%) від {last_price:.2f}")
+                        else:
+                            logger.info(f"✅ {symbol}: Прогнози: {[f'{p:.2f}' for p in predictions]}")
             
-            if result:
-                logger.info("🎯 Результат прогнозування:")
-                logger.info(f"   Символ: {result['symbol']}")
-                logger.info(f"   Остання ціна: {result['last_price']:.2f}")
-                logger.info(f"   Прогнози: {[f'{p:.2f}' for p in result['predictions']]}")
-                logger.info(f"   Час обробки: {result['processing_time']:.2f}s")
+            # Підсумок для всіх символів
+            if all_results:
+                logger.info("🎯 Загальні результати прогнозування:")
+                for result in all_results:
+                    symbol = result['symbol']
+                    last_price = result['last_price']
+                    predictions = result['predictions']
+                    if predictions:
+                        # Розраховуємо відсоткову похибку для першого прогнозу
+                        first_pred = predictions[0]
+                        price_error_pct = ((first_pred - last_price) / last_price) * 100
+                        error_sign = "+" if price_error_pct >= 0 else ""
+                        logger.info(f"   {symbol}: Остання ціна {last_price:.2f}, Прогноз {first_pred:.2f} ({error_sign}{price_error_pct:.2f}%)")
     
     except KeyboardInterrupt:
         logger.info("⏸️ Отримано сигнал переривання")
     except Exception as e:
         logger.error(f"❌ Критична помилка: {e}", exc_info=True)
     finally:
+        # Зупинка моніторингу
+        monitoring_system.stop_monitoring()
+        if 'monitoring_task' in locals():
+            monitoring_task.cancel()
+            try:
+                await monitoring_task
+            except asyncio.CancelledError:
+                pass
+        logger.info("📊 Моніторинг зупинено")
+        
         await crypto_system.cleanup()
 
 if __name__ == "__main__":

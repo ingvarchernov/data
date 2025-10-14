@@ -388,6 +388,30 @@ class OptimizedIndicatorCalculator:
         vwap = (typical_price * data['volume']).cumsum() / data['volume'].cumsum()
         return vwap
 
+    async def calculate_momentum_async(self, data: pd.DataFrame, period: int = 10) -> pd.Series:
+        """Розрахунок Momentum"""
+        momentum = data['close'] - data['close'].shift(period)
+        result = momentum.dropna()
+        result.name = 'Momentum'
+        return result
+
+    async def calculate_roc_async(self, data: pd.DataFrame, period: int = 10) -> pd.Series:
+        """Розрахунок Rate of Change (ROC)"""
+        roc = ((data['close'] - data['close'].shift(period)) / data['close'].shift(period)) * 100
+        result = roc.dropna()
+        result.name = 'ROC'
+        return result
+
+    async def calculate_trix_async(self, data: pd.DataFrame, period: int = 15) -> pd.Series:
+        """Розрахунок TRIX (Triple Exponential Average)"""
+        ema1 = data['close'].ewm(span=period).mean()
+        ema2 = ema1.ewm(span=period).mean()
+        ema3 = ema2.ewm(span=period).mean()
+        trix = ((ema3 - ema3.shift(1)) / ema3.shift(1)) * 100
+        result = trix.dropna()
+        result.name = 'TRIX'
+        return result
+
     async def calculate_all_indicators_batch(self, data: pd.DataFrame, config: Dict = None) -> Dict[str, pd.Series]:
         """Пакетний розрахунок всіх індикаторів"""
         if config is None:
@@ -402,7 +426,12 @@ class OptimizedIndicatorCalculator:
                 'stoch_k': 14,
                 'stoch_smooth_k': 3,
                 'stoch_smooth_d': 3,
-                'atr_period': 14
+                'atr_period': 14,
+                'momentum_period': 10,
+                'roc_period': 10,
+                'williams_r_period': 14,
+                'cci_period': 20,
+                'trix_period': 15
             }
         
         # Запускаємо всі розрахунки паралельно
@@ -414,8 +443,11 @@ class OptimizedIndicatorCalculator:
             self.calculate_stochastic_async(data, config['stoch_k'], config['stoch_smooth_k'], config['stoch_smooth_d']),
             self.calculate_atr_async(data, config['atr_period']),
             # Нові індикатори
-            self.calculate_williams_r_async(data, 14),
-            self.calculate_cci_async(data, 20),
+            self.calculate_williams_r_async(data, config.get('williams_r_period', 14)),
+            self.calculate_cci_async(data, config.get('cci_period', 20)),
+            self.calculate_momentum_async(data, config.get('momentum_period', 10)),
+            self.calculate_roc_async(data, config.get('roc_period', 10)),
+            self.calculate_trix_async(data, config.get('trix_period', 15)),
             self.calculate_ema_async(data, 10),  # EMA_10
             self.calculate_ema_async(data, 50),  # EMA_50
         ]
@@ -431,8 +463,11 @@ class OptimizedIndicatorCalculator:
         atr = results[5]
         williams_r = results[6]
         cci = results[7]
-        ema_10 = results[8]
-        ema_50 = results[9]
+        momentum = results[8]
+        roc = results[9]
+        trix = results[10]
+        ema_10 = results[11]
+        ema_50 = results[12]
         
         return {
             'RSI': rsi,
@@ -447,7 +482,10 @@ class OptimizedIndicatorCalculator:
             'Stoch_D': stoch_d,
             'ATR': atr,
             'Williams_R': williams_r,
-            'CCI': cci
+            'CCI': cci,
+            'Momentum': momentum,
+            'ROC': roc,
+            'TRIX': trix
         }
 
 # ============================================================================

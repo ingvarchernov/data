@@ -52,14 +52,19 @@ class DatabaseHistoryCallback(callbacks.Callback):
             with self.db_engine.connect() as conn:
                 conn.execute(text("""
                     INSERT INTO training_history 
-                    (symbol_id, interval_id, fold, epoch, loss, mae, val_loss, val_mae)
-                    VALUES (:symbol_id, :interval_id, :fold, :epoch, :loss, :mae, :val_loss, :val_mae)
+                    (symbol_id, interval_id, fold, epoch, loss, mae, val_loss, val_mae, mape, val_mape, directional_accuracy, real_mae, real_mape)
+                    VALUES (:symbol_id, :interval_id, :fold, :epoch, :loss, :mae, :val_loss, :val_mae, :mape, :val_mape, :directional_accuracy, :real_mae, :real_mape)
                     ON CONFLICT (symbol_id, interval_id, fold, epoch)
                     DO UPDATE SET
                         loss = EXCLUDED.loss,
                         mae = EXCLUDED.mae,
                         val_loss = EXCLUDED.val_loss,
-                        val_mae = EXCLUDED.val_mae
+                        val_mae = EXCLUDED.val_mae,
+                        mape = EXCLUDED.mape,
+                        val_mape = EXCLUDED.val_mape,
+                        directional_accuracy = EXCLUDED.directional_accuracy,
+                        real_mae = EXCLUDED.real_mae,
+                        real_mape = EXCLUDED.real_mape
                 """), {
                     'symbol_id': self.symbol_id,
                     'interval_id': self.interval_id,
@@ -68,7 +73,12 @@ class DatabaseHistoryCallback(callbacks.Callback):
                     'loss': float(logs.get('loss', 0)),
                     'mae': float(logs.get('mae', 0)),
                     'val_loss': float(logs.get('val_loss', 0)),
-                    'val_mae': float(logs.get('val_mae', 0))
+                    'val_mae': float(logs.get('val_mae', 0)),
+                    'mape': float(logs.get('mape', 0)),
+                    'val_mape': float(logs.get('val_mape', 0)),
+                    'directional_accuracy': float(logs.get('directional_accuracy', 0)),
+                    'real_mae': float(logs.get('real_mae', logs.get('mae', 0))),
+                    'real_mape': float(logs.get('real_mape', logs.get('mape', 0)))
                 })
                 conn.commit()
         except Exception as e:
@@ -92,21 +102,48 @@ class DenormalizedMetricsCallback(callbacks.Callback):
         
         try:
             # Отримуємо передбачення на валідаційних даних
-            if self.X_val is not None and self.y_val is not None:
+            if self.X_val is not None and self.y_val is not None and self.scaler is not None:
                 y_pred = self.model.predict(self.X_val, verbose=0).flatten()
                 
-                # Розраховуємо метрики на нормалізованих даних
+                # Розраховуємо метрики на рівні returns (нормалізованих)
                 mae_norm = np.mean(np.abs(self.y_val - y_pred))
                 mape_norm = np.mean(np.abs((self.y_val - y_pred) / (np.abs(self.y_val) + 1e-6))) * 100
                 
-                # Точність напрямку
-                true_direction = np.sign(self.y_val)
-                pred_direction = np.sign(y_pred)
-                dir_acc = np.mean(true_direction == pred_direction) * 100
+                # Конвертуємо в абсолютні ціни для реальних метрик
+                # Поточні ціни з послідовностей
+                current_prices_scaled = self.X_val[:, -1, self.feature_index]  # остання ціна в кожній послідовності
+                
+                # Передбачені наступні ціни = поточна + різниця
+                next_prices_scaled_pred = current_prices_scaled + y_pred
+                next_prices_scaled_true = current_prices_scaled + self.y_val
+                
+                # Денормалізуємо
+                dummy_pred = np.zeros((len(next_prices_scaled_pred), self.scaler.scale_.shape[0]))
+                dummy_true = np.zeros((len(next_prices_scaled_true), self.scaler.scale_.shape[0]))
+                dummy_pred[:, self.feature_index] = next_prices_scaled_pred
+                dummy_true[:, self.feature_index] = next_prices_scaled_true
+                
+                y_true_denorm = self.scaler.inverse_transform(dummy_true)[:, self.feature_index]
+                y_pred_denorm = self.scaler.inverse_transform(dummy_pred)[:, self.feature_index]
+                
+                # Метрики на денормалізованих даних
+                mae_real = np.mean(np.abs(y_true_denorm - y_pred_denorm))
+                mape_real = np.mean(np.abs((y_true_denorm - y_pred_denorm) / (np.abs(y_true_denorm) + 1e-6))) * 100
+                
+                # Directional accuracy: знак різниць
+                dir_acc = np.mean(np.sign(self.y_val) == np.sign(y_pred)) * 100
                 
                 logger.info(f"💰 Нормалізовані метрики (Epoch {epoch + 1}): "
-                           f"MAE={mae_norm:.4f}, MAPE={mape_norm:.2f}%, "
-                           f"Напрямок={dir_acc:.1f}%")
+                           f"MAE={mae_norm:.4f}, MAPE={mape_norm:.2f}%, Напрямок={dir_acc:.1f}%")
+                logger.info(f"💵 Реальні метрики (Epoch {epoch + 1}): "
+                           f"MAE={mae_real:.2f}, MAPE={mape_real:.2f}%, Напрямок={dir_acc:.1f}%")
+                
+                # Додаємо метрики до logs для збереження в БД
+                logs['mape'] = mape_real
+                logs['val_mape'] = mape_real  # для validation використовуємо ті ж метрики
+                logs['directional_accuracy'] = dir_acc
+                logs['real_mae'] = mae_real
+                logs['real_mape'] = mape_real
             
         except Exception as e:
             logger.error(f"❌ Помилка розрахунку метрик: {e}")
@@ -193,7 +230,13 @@ class OptimizedPricePredictionModel:
                  model_config: Dict = None):
         
         self.input_shape = input_shape
-        self.model_type = model_type
+        # Мапінг типів моделей для зручності користувача
+        model_type_mapping = {
+            "transformer": "transformer_lstm",
+            "advanced_lstm": "advanced_lstm", 
+            "cnn_lstm": "cnn_lstm"
+        }
+        self.model_type = model_type_mapping.get(model_type, model_type)
         self.use_mixed_precision = use_mixed_precision
         self.use_xla = use_xla
         self.scaler = scaler
@@ -289,15 +332,15 @@ class OptimizedPricePredictionModel:
         
         # Багатошарові LSTM з residual connections та L2 регуляризацією
         lstm1 = layers.LSTM(lstm_units_1, return_sequences=True, dropout=0.4, recurrent_dropout=0.3,
-                           kernel_regularizer=tf.keras.regularizers.l2(0.001))(x)
+                           kernel_regularizer=tf.keras.regularizers.l2(0.01))(x)
         lstm1_norm = layers.LayerNormalization()(lstm1)
         
         lstm2 = layers.LSTM(lstm_units_2, return_sequences=True, dropout=0.4, recurrent_dropout=0.3,
-                           kernel_regularizer=tf.keras.regularizers.l2(0.001))(lstm1_norm)
+                           kernel_regularizer=tf.keras.regularizers.l2(0.01))(lstm1_norm)
         lstm2_norm = layers.LayerNormalization()(lstm2)
         
         lstm3 = layers.LSTM(lstm_units_3, return_sequences=True, dropout=0.4, recurrent_dropout=0.3,
-                           kernel_regularizer=tf.keras.regularizers.l2(0.001))(lstm2_norm)
+                           kernel_regularizer=tf.keras.regularizers.l2(0.01))(lstm2_norm)
         lstm3_norm = layers.LayerNormalization()(lstm3)
         
         # Attention механізм з параметрами з конфігу
@@ -314,7 +357,7 @@ class OptimizedPricePredictionModel:
         x = pooled
         for i, units in enumerate(dense_units):
             x = layers.Dense(units, activation='relu',
-                           kernel_regularizer=tf.keras.regularizers.l2(0.001))(x)
+                           kernel_regularizer=tf.keras.regularizers.l2(0.01))(x)
             x = layers.BatchNormalization()(x)
             dropout_rate = 0.5 if i == 0 else 0.4 if i == 1 else 0.3
             x = layers.Dropout(dropout_rate)(x)
@@ -402,6 +445,27 @@ class OptimizedPricePredictionModel:
         
         return model
     
+    def _create_lr_schedule(self, epochs: int = 200, warmup_epochs: int = 10, base_lr: float = 0.001):
+        """Створює розклад навчання з warmup та cosine annealing"""
+        def lr_schedule(epoch):
+            if epoch < warmup_epochs:
+                # Linear warmup
+                return base_lr * (epoch + 1) / warmup_epochs
+            else:
+                # Cosine annealing з restarts
+                progress = (epoch - warmup_epochs) / (epochs - warmup_epochs)
+                cosine_decay = 0.5 * (1 + np.cos(np.pi * progress))
+                
+                # Додаємо periodic restarts кожні 50 епох після warmup
+                if epoch > warmup_epochs + 50:
+                    cycle = (epoch - warmup_epochs) // 50
+                    cycle_progress = ((epoch - warmup_epochs) % 50) / 50
+                    cosine_decay = cosine_decay * (0.5 + 0.5 * np.cos(2 * np.pi * cycle_progress))
+                
+                return base_lr * cosine_decay
+        
+        return lr_schedule
+    
     def get_callbacks(self, 
                      model_save_path: str,
                      patience: int = 50,
@@ -409,7 +473,7 @@ class OptimizedPricePredictionModel:
         """Створення оптимізованих callback'ів"""
         
         callback_list = [
-            # Early stopping
+            # Покращений Early stopping з моніторингом основних метрик
             callbacks.EarlyStopping(
                 monitor='val_loss',
                 patience=patience,
@@ -446,9 +510,9 @@ class OptimizedPricePredictionModel:
                 update_freq='epoch'
             ),
             
-            # Learning rate scheduler
+            # Покращений Learning rate scheduler з warmup та cosine annealing
             callbacks.LearningRateScheduler(
-                lambda epoch: 0.001 * (0.95 ** epoch) if epoch > 100 else 0.001,
+                self._create_lr_schedule(epochs=200, warmup_epochs=10),
                 verbose=0
             ),
             
@@ -506,13 +570,13 @@ class OptimizedPricePredictionModel:
         # Callback'и
         callback_list = self.get_callbacks(model_save_path)
         
-        # Додаємо DB callback якщо переданий
-        if db_callback is not None:
-            callback_list.append(db_callback)
-        
-        # Додаємо додаткові callback'и (наприклад, денормалізовані метрики)
+        # Додаємо додаткові callback'и ПЕРЕД DB callback (щоб метрики були розраховані)
         if additional_callbacks is not None:
             callback_list.extend(additional_callbacks)
+        
+        # Додаємо DB callback якщо переданий (після additional, щоб метрики були в logs)
+        if db_callback is not None:
+            callback_list.append(db_callback)
         
         # Тренування
         logger.info(f"🚀 Початок тренування моделі {self.model_type}")

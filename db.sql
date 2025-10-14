@@ -74,10 +74,14 @@ CREATE TABLE training_history (
     val_loss DOUBLE PRECISION,
     val_mae DOUBLE PRECISION,
     val_mape DOUBLE PRECISION,
+    directional_accuracy DOUBLE PRECISION,
     real_mae DOUBLE PRECISION,
     real_mape DOUBLE PRECISION,
     PRIMARY KEY (symbol_id, interval_id, fold, epoch)
 );
+
+-- Додавання нової колонки до існуючої таблиці (якщо потрібно)
+-- ALTER TABLE training_history ADD COLUMN directional_accuracy DOUBLE PRECISION;
 
 -- Створення таблиці predictions
 CREATE TABLE predictions (
@@ -106,3 +110,78 @@ CREATE TABLE scaler_stats (
 -- Додаткові індекси для швидкості
 CREATE INDEX idx_historical_data_timestamp ON historical_data (timestamp);
 CREATE INDEX idx_predictions_symbol_interval_timestamp ON predictions (symbol_id, interval_id, timestamp);
+
+-- Таблиці для системи моніторингу
+CREATE TABLE system_metrics (
+    id SERIAL PRIMARY KEY,
+    timestamp TIMESTAMP NOT NULL,
+    cpu_percent DOUBLE PRECISION,
+    memory_percent DOUBLE PRECISION,
+    disk_usage DOUBLE PRECISION,
+    gpu_memory_used DOUBLE PRECISION,
+    gpu_memory_total DOUBLE PRECISION,
+    gpu_utilization DOUBLE PRECISION
+);
+
+CREATE TABLE model_metrics (
+    id SERIAL PRIMARY KEY,
+    symbol VARCHAR(32) NOT NULL,
+    interval VARCHAR(16) NOT NULL,
+    model_type VARCHAR(32) NOT NULL,
+    timestamp TIMESTAMP NOT NULL,
+    training_time DOUBLE PRECISION,
+    epochs INTEGER,
+    final_loss DOUBLE PRECISION,
+    final_val_loss DOUBLE PRECISION,
+    final_mae DOUBLE PRECISION,
+    final_val_mae DOUBLE PRECISION,
+    directional_accuracy DOUBLE PRECISION,
+    mape DOUBLE PRECISION,
+    val_mape DOUBLE PRECISION
+);
+
+CREATE TABLE prediction_metrics (
+    id SERIAL PRIMARY KEY,
+    symbol VARCHAR(32) NOT NULL,
+    interval VARCHAR(16) NOT NULL,
+    timestamp TIMESTAMP NOT NULL,
+    predicted_price DOUBLE PRECISION,
+    actual_price DOUBLE PRECISION,
+    prediction_error DOUBLE PRECISION,
+    directional_correct BOOLEAN,
+    confidence_score DOUBLE PRECISION
+);
+
+-- Індекси для таблиць моніторингу
+CREATE INDEX idx_system_metrics_timestamp ON system_metrics (timestamp);
+CREATE INDEX idx_model_metrics_symbol_timestamp ON model_metrics (symbol, timestamp);
+CREATE INDEX idx_prediction_metrics_symbol_timestamp ON prediction_metrics (symbol, timestamp);
+
+-- Таблиця для фундаментальних даних
+CREATE TABLE fundamental_data (
+    id SERIAL PRIMARY KEY,
+    timestamp TIMESTAMP NOT NULL,
+    symbol VARCHAR(20) NOT NULL,
+    news_sentiment_score FLOAT,
+    news_sentiment_confidence FLOAT,
+    news_volume INTEGER,
+    social_sentiment_score FLOAT,
+    social_sentiment_confidence FLOAT,
+    social_volume INTEGER,
+    active_addresses INTEGER,
+    transaction_count INTEGER,
+    transaction_volume FLOAT,
+    large_transactions INTEGER,
+    whale_activity FLOAT,
+    network_hashrate FLOAT,
+    gas_price FLOAT,
+    aggregate_sentiment FLOAT,
+    sentiment_momentum FLOAT,
+    fear_greed_index FLOAT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(timestamp, symbol)
+);
+
+-- Індекси для фундаментальних даних
+CREATE INDEX idx_fundamental_timestamp_symbol ON fundamental_data (timestamp, symbol);
+CREATE INDEX idx_fundamental_symbol_timestamp ON fundamental_data (symbol, timestamp DESC);
