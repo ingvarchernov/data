@@ -185,3 +185,65 @@ CREATE TABLE fundamental_data (
 -- Індекси для фундаментальних даних
 CREATE INDEX idx_fundamental_timestamp_symbol ON fundamental_data (timestamp, symbol);
 CREATE INDEX idx_fundamental_symbol_timestamp ON fundamental_data (symbol, timestamp DESC);
+
+-- Таблиця для торгових сигналів
+CREATE TABLE trading_signals (
+    id SERIAL PRIMARY KEY,
+    symbol VARCHAR(20) NOT NULL,
+    action VARCHAR(10) NOT NULL, -- BUY, SELL, HOLD
+    confidence FLOAT NOT NULL,
+    entry_price DECIMAL(20, 8) NOT NULL,
+    stop_loss DECIMAL(20, 8),
+    take_profit DECIMAL(20, 8),
+    quantity DECIMAL(20, 8) NOT NULL,
+    strategy VARCHAR(50),
+    prediction_source VARCHAR(50) DEFAULT 'technical', -- ml_model, technical
+    status VARCHAR(20) DEFAULT 'generated', -- generated, executed, rejected
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    executed_at TIMESTAMP,
+    notes TEXT
+);
+
+-- Таблиця для відкритих позицій
+CREATE TABLE positions (
+    id SERIAL PRIMARY KEY,
+    symbol VARCHAR(20) NOT NULL,
+    side VARCHAR(10) NOT NULL, -- LONG, SHORT
+    entry_price DECIMAL(20, 8) NOT NULL,
+    quantity DECIMAL(20, 8) NOT NULL,
+    stop_loss DECIMAL(20, 8),
+    take_profit DECIMAL(20, 8),
+    entry_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    strategy VARCHAR(50),
+    status VARCHAR(20) DEFAULT 'open', -- open, closed, stopped
+    signal_id INTEGER REFERENCES trading_signals(id),
+    metadata JSONB
+);
+
+-- Таблиця для закритих угод
+CREATE TABLE trades (
+    id SERIAL PRIMARY KEY,
+    symbol VARCHAR(20) NOT NULL,
+    side VARCHAR(10) NOT NULL, -- LONG, SHORT
+    entry_price DECIMAL(20, 8) NOT NULL,
+    exit_price DECIMAL(20, 8) NOT NULL,
+    quantity DECIMAL(20, 8) NOT NULL,
+    entry_time TIMESTAMP NOT NULL,
+    exit_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    pnl DECIMAL(20, 8) NOT NULL, -- Прибуток/збиток в доларах
+    pnl_percentage DECIMAL(10, 4), -- Прибуток/збиток у відсотках
+    strategy VARCHAR(50),
+    exit_reason VARCHAR(50), -- take_profit, stop_loss, manual, signal
+    position_id INTEGER REFERENCES positions(id),
+    signal_id INTEGER REFERENCES trading_signals(id),
+    fees DECIMAL(20, 8) DEFAULT 0,
+    metadata JSONB
+);
+
+-- Індекси для торгів
+CREATE INDEX idx_trading_signals_symbol_created ON trading_signals (symbol, created_at DESC);
+CREATE INDEX idx_trading_signals_status ON trading_signals (status);
+CREATE INDEX idx_positions_symbol_status ON positions (symbol, status);
+CREATE INDEX idx_trades_symbol_exit_time ON trades (symbol, exit_time DESC);
+CREATE INDEX idx_trades_pnl ON trades (pnl DESC);
+CREATE INDEX idx_trades_strategy ON trades (strategy);

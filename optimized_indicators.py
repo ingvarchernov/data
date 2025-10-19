@@ -185,10 +185,30 @@ class OptimizedIndicatorCalculator:
             else:
                 macd, signal_line, histogram = fast_indicators.fast_macd(prices, fast, slow, signal)
                 
-            macd_index = data.index[slow-1:slow-1+len(macd)]
-            signal_index = data.index[slow-1+signal-1:slow-1+signal-1+len(signal_line)]
-            return (pd.Series(macd, index=macd_index, name='MACD'), 
-                   pd.Series(signal_line, index=signal_index, name='MACD_Signal'))
+            # Безпечний розрахунок індексів з перевіркою довжини
+            try:
+                start_idx = max(slow - 1, 0)
+                macd_start = start_idx
+                macd_end = min(macd_start + len(macd), len(data))
+                macd_index = data.index[macd_start:macd_end]
+                
+                signal_start = max(start_idx + signal - 1, 0)
+                signal_end = min(signal_start + len(signal_line), len(data))
+                signal_index = data.index[signal_start:signal_end]
+                
+                # Якщо індекси не співпадають за довжиною, використовуємо fallback
+                if len(macd_index) != len(macd) or len(signal_index) != len(signal_line):
+                    logger.debug(
+                        "MACD index length mismatch: macd(%s) vs index(%s), signal(%s) vs index(%s) — fallback to pandas",
+                        len(macd), len(macd_index), len(signal_line), len(signal_index)
+                    )
+                    return _pandas_fallback_macd(data, fast, slow, signal)
+                
+                return (pd.Series(macd, index=macd_index, name='MACD'), 
+                       pd.Series(signal_line, index=signal_index, name='MACD_Signal'))
+            except Exception as index_error:
+                logger.debug(f"MACD index calculation error: {index_error}")
+                return _pandas_fallback_macd(data, fast, slow, signal)
                    
         except Exception as e:
             logger.warning(f"Rust MACD failed, fallback to pandas: {e}")
@@ -603,8 +623,17 @@ def calculate_all_indicators(data: pd.DataFrame, config: dict = None) -> pd.Data
     
     try:
         import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        
+        # Перевіряємо чи існує event loop
+        try:
+            loop = asyncio.get_running_loop()
+            # Якщо loop вже запущений, використовуємо fallback
+            logger.warning("Event loop already running, using fallback calculations")
+            return _fallback_all_indicators(data, config)
+        except RuntimeError:
+            # Немає активного loop - створюємо новий
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
         
         # RSI
         result['RSI'] = loop.run_until_complete(

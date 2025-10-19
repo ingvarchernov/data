@@ -3,6 +3,7 @@ import logging
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
+from gpu_config import configure_gpu
 
 @tf.keras.utils.register_keras_serializable()
 def mape(y_true, y_pred):
@@ -13,14 +14,21 @@ def mape(y_true, y_pred):
 
 @tf.keras.utils.register_keras_serializable()
 def directional_accuracy(y_true, y_pred):
-    """Точність напрямку руху ціни"""
+    """Точність напрямку руху ціни (зростання/падіння)"""
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
-    true_direction = tf.sign(y_true)
-    pred_direction = tf.sign(y_pred)
-    return tf.reduce_mean(tf.cast(tf.equal(true_direction, pred_direction), tf.float32))
+    
+    # Рахуємо різницю (дельту) між послідовними значеннями
+    # Якщо батч має форму (batch_size, 1), береме знак самих значень
+    # Це працює, якщо y_true вже є зміною ціни (price_diff)
+    true_direction = tf.sign(y_true + 1e-8)  # додаємо epsilon щоб уникнути 0
+    pred_direction = tf.sign(y_pred + 1e-8)
+    
+    # Порівнюємо напрямки
+    correct = tf.cast(tf.equal(true_direction, pred_direction), tf.float32)
+    return tf.reduce_mean(correct)
 from keras import layers, callbacks, optimizers, mixed_precision
-from typing import Tuple, Dict, List, Optional
+from typing import Tuple, Dict, List, Optional, Union
 import matplotlib.pyplot as plt
 from datetime import datetime
 import gc
@@ -104,38 +112,34 @@ class DenormalizedMetricsCallback(callbacks.Callback):
             # Отримуємо передбачення на валідаційних даних
             if self.X_val is not None and self.y_val is not None and self.scaler is not None:
                 y_pred = self.model.predict(self.X_val, verbose=0).flatten()
+                y_true = self.y_val  # відсоткові зміни
                 
-                # Розраховуємо метрики на рівні returns (нормалізованих)
-                mae_norm = np.mean(np.abs(self.y_val - y_pred))
-                mape_norm = np.mean(np.abs((self.y_val - y_pred) / (np.abs(self.y_val) + 1e-6))) * 100
+                # Розраховуємо метрики на рівні відсоткових змін
+                mae_norm = np.mean(np.abs(y_true - y_pred))
+                mape_norm = np.mean(np.abs((y_true - y_pred) / (np.abs(y_true) + 1e-6))) * 100
                 
-                # Конвертуємо в абсолютні ціни для реальних метрик
-                # Поточні ціни з послідовностей
-                current_prices_scaled = self.X_val[:, -1, self.feature_index]  # остання ціна в кожній послідовності
+                # Directional accuracy: знак відсоткових змін
+                dir_acc = np.mean(np.sign(y_true) == np.sign(y_pred)) * 100
                 
-                # Передбачені наступні ціни = поточна + різниця
-                next_prices_scaled_pred = current_prices_scaled + y_pred
-                next_prices_scaled_true = current_prices_scaled + self.y_val
-                
-                # Денормалізуємо
-                dummy_pred = np.zeros((len(next_prices_scaled_pred), self.scaler.scale_.shape[0]))
-                dummy_true = np.zeros((len(next_prices_scaled_true), self.scaler.scale_.shape[0]))
-                dummy_pred[:, self.feature_index] = next_prices_scaled_pred
-                dummy_true[:, self.feature_index] = next_prices_scaled_true
-                
-                y_true_denorm = self.scaler.inverse_transform(dummy_true)[:, self.feature_index]
-                y_pred_denorm = self.scaler.inverse_transform(dummy_pred)[:, self.feature_index]
-                
-                # Метрики на денормалізованих даних
-                mae_real = np.mean(np.abs(y_true_denorm - y_pred_denorm))
-                mape_real = np.mean(np.abs((y_true_denorm - y_pred_denorm) / (np.abs(y_true_denorm) + 1e-6))) * 100
-                
-                # Directional accuracy: знак різниць
-                dir_acc = np.mean(np.sign(self.y_val) == np.sign(y_pred)) * 100
-                
-                logger.info(f"💰 Нормалізовані метрики (Epoch {epoch + 1}): "
+                logger.info(f"💰 Метрики відсоткових змін (Epoch {epoch + 1}): "
                            f"MAE={mae_norm:.4f}, MAPE={mape_norm:.2f}%, Напрямок={dir_acc:.1f}%")
-                logger.info(f"💵 Реальні метрики (Epoch {epoch + 1}): "
+                
+                # Реальні метрики: конвертуємо назад до абсолютних цін для інтерпретації
+                # Отримуємо поточні ціни з валідаційних даних (останній timestep, денормалізовані)
+                # Оскільки дані нормалізовані, беремо денормалізовані close з X_val
+                current_prices = self.X_val[:, -1, self.feature_index].flatten()
+                
+                # Реальні наступні ціни = поточні + (передбачені відсоткові зміни * поточні / 100)
+                y_true_pct = y_true  # вже відсоткові зміни
+                y_pred_pct = y_pred  # вже відсоткові зміни
+                
+                true_next_prices = current_prices * (1 + y_true_pct / 100)
+                pred_next_prices = current_prices * (1 + y_pred_pct / 100)
+                
+                mae_real = np.mean(np.abs(true_next_prices - pred_next_prices))
+                mape_real = np.mean(np.abs((true_next_prices - pred_next_prices) / (np.abs(true_next_prices) + 1e-6))) * 100
+                
+                logger.info(f"💵 Реальні метрики цін (Epoch {epoch + 1}): "
                            f"MAE={mae_real:.2f}, MAPE={mape_real:.2f}%, Напрямок={dir_acc:.1f}%")
                 
                 # Додаємо метрики до logs для збереження в БД
@@ -259,22 +263,20 @@ class OptimizedPricePredictionModel:
             'mape': mape,
             'directional_accuracy': directional_accuracy,
         }
+        
+        # Ініціалізація моделі
+        self.model = None
+        
+        # Створюємо модель
+        self.create_model()
     
     def _configure_gpu(self):
         """Оптимальне використання GPU без надмірного логування"""
-        try:
-            gpus = tf.config.experimental.list_physical_devices('GPU')
-            if gpus:
-                tf.config.set_visible_devices(gpus, 'GPU')
-                tf.config.experimental.set_memory_growth(gpus[0], True)
-                if self.use_xla:
-                    tf.config.optimizer.set_jit(True)
-                    logger.info("✅ XLA JIT увімкнено")
-                logger.info(f"✅ GPU доступний: {len(gpus)} пристроїв")
-            else:
-                logger.warning("⚠️ GPU не знайдено, використовується CPU")
-        except Exception as e:
-            logger.error(f"❌ Помилка налаштування GPU: {e}")
+        configure_gpu(
+            use_mixed_precision=self.use_mixed_precision,
+            use_xla=self.use_xla,
+            memory_growth=True,
+        )
     
     def build_transformer_lstm_model(self) -> keras.Model:
         """Hybrid Transformer-LSTM модель"""
@@ -398,6 +400,30 @@ class OptimizedPricePredictionModel:
         
         return model
     
+    def build_dense_model(self) -> keras.Model:
+        """Покращена Dense модель для прогнозування з індикаторами"""
+        inputs = layers.Input(shape=self.input_shape, name='input')
+
+        # Отримуємо dense_units з конфігу або використовуємо defaults
+        dense_units = self.model_config.get('dense_units', [256, 128, 64])
+
+        # Нормалізація входу
+        x = layers.LayerNormalization()(inputs)
+
+        # Декілька Dense шарів з dropout та batch normalization
+        for i, units in enumerate(dense_units):
+            x = layers.Dense(units, activation='relu',
+                           kernel_regularizer=tf.keras.regularizers.l2(0.01))(x)
+            x = layers.BatchNormalization()(x)
+            x = layers.Dropout(0.3)(x)
+
+        # Вихідний шар
+        outputs = layers.Dense(1, activation='sigmoid', dtype='float32', name='output')(x)
+
+        model = keras.Model(inputs=inputs, outputs=outputs, name='enhanced_dense_model')
+
+        return model
+    
     def create_model(self) -> keras.Model:
         """Створення моделі згідно з типом"""
         if self.model_type == "transformer_lstm":
@@ -406,12 +432,16 @@ class OptimizedPricePredictionModel:
             model = self.build_advanced_lstm_model()
         elif self.model_type == "cnn_lstm":
             model = self.build_cnn_lstm_model()
+        elif self.model_type == "dense":
+            model = self.build_dense_model()
         else:
             raise ValueError(f"Невідомий тип моделі: {self.model_type}")
         
         logger.info(f"✅ Створена модель типу: {self.model_type}")
         logger.info(f"📊 Параметрів в моделі: {model.count_params():,}")
         
+        # Зберігаємо модель
+        self.model = model
         return model
     
     def compile_model(self, model: keras.Model, learning_rate: float = 0.001) -> keras.Model:
@@ -432,8 +462,11 @@ class OptimizedPricePredictionModel:
         
         model.compile(
             optimizer=optimizer,
-            loss='huber',  # Huber loss більш стійкий до викидів
-            metrics=['mae'],  # Тільки основна метрика для компактного виводу
+            loss='binary_crossentropy',  # Binary classification
+            metrics=[
+                'accuracy',  # accuracy for binary classification
+                directional_accuracy  # точність напрямку руху
+            ],
             jit_compile=self.use_xla
         )
         
@@ -599,12 +632,12 @@ class OptimizedPricePredictionModel:
                                 metadata: Dict = None):
         """Збереження моделі з метаданими"""
         try:
-            # Зберігаємо модель
-            model.save(save_path, save_format='keras')
+            # Зберігаємо модель у HDF5 форматі для сумісності
+            model.save(save_path, save_format='h5')
             
             # Зберігаємо метадані
             if metadata:
-                metadata_path = save_path.replace('.keras', '_metadata.json')
+                metadata_path = save_path.replace('.h5', '_metadata.json')
                 import json
                 with open(metadata_path, 'w') as f:
                     json.dump(metadata, f, indent=2)
@@ -615,12 +648,17 @@ class OptimizedPricePredictionModel:
             logger.error(f"❌ Помилка збереження моделі: {e}")
             raise
     
-    def load_model_with_custom_objects(self, model_path: str) -> keras.Model:
-        """Завантаження моделі з кастомними об'єктами"""
+    def load_model(self, model_path: str):
+        """Завантаження моделі з файлу"""
         try:
-            model = keras.models.load_model(model_path, custom_objects=self.custom_objects)
+            # Завантажуємо модель
+            self.model = keras.models.load_model(
+                model_path, 
+                custom_objects=self.custom_objects
+            )
+            
             logger.info(f"✅ Модель завантажена: {model_path}")
-            return model
+            
         except Exception as e:
             logger.error(f"❌ Помилка завантаження моделі: {e}")
             raise
@@ -673,16 +711,60 @@ class OptimizedPricePredictionModel:
             logger.info(f"✅ Графік збережено: {save_path}")
         
         plt.close()
+    
+    def predict(self, X: np.ndarray, return_confidence: bool = False) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+        """Прогнозування з використанням навченої моделі
+        
+        Args:
+            X: Вхідні дані для прогнозування
+            return_confidence: Чи повертати також впевненість прогнозу
+            
+        Returns:
+            Прогноз або (прогноз, впевненість) якщо return_confidence=True
+        """
+        if self.model is None:
+            raise ValueError("Модель не ініціалізована. Спочатку завантажте або навчіть модель.")
+        
+        try:
+            # Переконуємося, що дані мають правильну форму
+            if len(X.shape) == 1:
+                X = X.reshape(1, -1)
+            
+            # Нормалізуємо дані, якщо є scaler
+            if self.scaler is not None:
+                X_scaled = self.scaler.transform(X)
+            else:
+                X_scaled = X
+            
+            # Робимо прогноз
+            predictions = self.model.predict(X_scaled, verbose=0)
+            
+            # Якщо потрібно повернути впевненість
+            if return_confidence:
+                # Проста оцінка впевненості на основі відстані від 0
+                confidence = 1.0 / (1.0 + np.abs(predictions.flatten()))
+                confidence = np.clip(confidence, 0.1, 0.9)  # Обмежуємо діапазон
+                return predictions.flatten(), confidence
+            
+            return predictions.flatten()
+            
+        except Exception as e:
+            logger.error(f"❌ Помилка прогнозування: {e}")
+            raise
 
 # Фабричні функції
-def create_transformer_lstm_model(input_shape: Tuple[int, int]) -> OptimizedPricePredictionModel:
+def create_transformer_lstm_model(input_shape: Tuple[int, ...]) -> OptimizedPricePredictionModel:
     """Створення Transformer-LSTM моделі"""
     return OptimizedPricePredictionModel(input_shape, "transformer_lstm")
 
-def create_advanced_lstm_model(input_shape: Tuple[int, int]) -> OptimizedPricePredictionModel:
+def create_advanced_lstm_model(input_shape: Tuple[int, ...]) -> OptimizedPricePredictionModel:
     """Створення покращеної LSTM моделі"""
     return OptimizedPricePredictionModel(input_shape, "advanced_lstm")
 
-def create_cnn_lstm_model(input_shape: Tuple[int, int]) -> OptimizedPricePredictionModel:
+def create_cnn_lstm_model(input_shape: Tuple[int, ...]) -> OptimizedPricePredictionModel:
     """Створення CNN-LSTM моделі"""
     return OptimizedPricePredictionModel(input_shape, "cnn_lstm")
+
+def create_dense_model(input_shape: Tuple[int, ...]) -> OptimizedPricePredictionModel:
+    """Створення Dense моделі"""
+    return OptimizedPricePredictionModel(input_shape, "dense")

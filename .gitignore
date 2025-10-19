@@ -1,29 +1,81 @@
-venv
-.venv
-__pycache__
+# Python
+venv/
+.venv/
+__pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
+*.egg
+
+# Environment & Configs
 .env
+.env.local
+*.local
+
+# Database
 *.db
 *.sqlite3
+
+# Logs
+logs/
 *.log
-*.egg-info
-*.egg
-.csv
-.txt
+nohup.out
+
+# Models & Checkpoints
+models/
+*.h5
+*.keras
+*.pkl
+*.joblib
+
+# Data files
+*.csv
 *.json
-*.md
+data/
+dataset/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Archives
 *.zip
 *.tar.gz
 *.tar
 *.rar
 *.tar.bz2
-.png
-.keras
-.idea
-.vscode
-target
+
+# Images
+*.png
+*.jpg
+*.jpeg
+
+# Rust build
+fast_indicators/target/
+fast_indicators/Cargo.lock
+
+# Backups
+*.backup
+*_old.py
+main.py.backup
+main_old.py
+
+# Temporary
+*.tmp
+*.temp
+.DS_Store
+
+# Specific excludes
+training_config.py
+advanced_training_config.py
+monitor_training_live.sh
+quick_test_btc.py
+test_rust_indicators.py
+strategy_manager.py
+telegram_bot.py
 lstm_model_fold_1_BTCUSDT_1h.keras
 lstm_model_fold_1_finetuned_BTCUSDT_1h_20250519_170300.keras
 lstm_model_fold_2_BTCUSDT_1h.keras
@@ -111,3 +163,4 @@ live_trading.py
 real_trading_test.py
 strategy_backtest_test.py
 trading_monitor.py
+archive
