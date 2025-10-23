@@ -57,12 +57,12 @@ class BinanceTestnetTrader:
         """
         self.test_mode = test_mode
 
-        # API ключі (з змінних середовища або параметрів)
-        self.api_key = api_key or os.getenv('BINANCE_TEST_API_KEY')
-        self.api_secret = api_secret or os.getenv('BINANCE_TEST_API_SECRET')
+        # API ключі (змінні середовища): пріоритет FUTURES_API_KEY
+        self.api_key = api_key or os.getenv('FUTURES_API_KEY') or os.getenv('BINANCE_TEST_API_KEY')
+        self.api_secret = api_secret or os.getenv('FUTURES_API_SECRET') or os.getenv('BINANCE_TEST_API_SECRET')
 
         if not self.api_key or not self.api_secret:
-            raise ValueError("Потрібно вказати BINANCE_TEST_API_KEY та BINANCE_TEST_API_SECRET")
+            raise ValueError("Потрібно вказати FUTURES_API_KEY/FUTURES_API_SECRET або BINANCE_TEST_API_KEY/BINANCE_TEST_API_SECRET")
 
         # Ініціалізація клієнта
         self.client = Client(self.api_key, self.api_secret, testnet=test_mode)

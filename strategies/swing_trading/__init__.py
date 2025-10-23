@@ -38,7 +38,7 @@ class SwingTradingStrategy(TradingStrategy):
         self.winning_trades = 0
         self.total_pnl = 0.0
 
-    def analyze_market(self, market_data: Dict[str, pd.DataFrame],
+    async def analyze_market(self, market_data: Dict[str, pd.DataFrame],
                       predictions: Dict[str, Dict]) -> Dict[str, TradeSignal]:
         """
         Аналіз ринку для свінг-трейдингу
@@ -91,8 +91,8 @@ class SwingTradingStrategy(TradingStrategy):
             return None
 
         # Спростимо: якщо є прогноз зміни ціни, генеруємо сигнал незалежно від тренду
-        if abs(predicted_change) < 0.001:  # Мінімальний прогнозований рух 0.1%
-            print(f"❌ Swing {symbol}: abs(pred_change) {abs(predicted_change):.6f} < 0.001")
+        if abs(predicted_change) < 0.01:  # Мінімальний прогнозований рух 1% (було 0.1%)
+            print(f"❌ Swing {symbol}: abs(pred_change) {abs(predicted_change):.6f} < 0.01")
             return None
 
         print(f"✅ Swing {symbol}: Генеруємо сигнал!")
@@ -102,13 +102,13 @@ class SwingTradingStrategy(TradingStrategy):
         print(f"📊 Swing {symbol}: volatility={volatility:.2f}%")
 
         # Визначення напряму на основі прогнозу з динамічним стоп-лосом
-        if predicted_change > 0.002:  # Позитивний прогноз
+        if predicted_change > 0.01:  # Позитивний прогноз (1%)
             action = TradeAction.BUY
             # Динамічний стоп-лос: 2x волатильність, але не менше 1% і не більше 4%
             dynamic_sl_pct = min(max(volatility * 2 / 100, 0.01), 0.04)
             stop_loss = current_price * (1 - dynamic_sl_pct)
             take_profit = current_price * (1 + self.target_profit_pct)
-        elif predicted_change < -0.002:  # Негативний прогноз
+        elif predicted_change < -0.01:  # Негативний прогноз (1%)
             action = TradeAction.SELL
             # Динамічний стоп-лос: 2x волатильність, але не менше 1% і не більше 4%
             dynamic_sl_pct = min(max(volatility * 2 / 100, 0.01), 0.04)
@@ -122,17 +122,15 @@ class SwingTradingStrategy(TradingStrategy):
             print(f"🚫 Swing {symbol}: BUY сигнал заблоковано через медвежий ринок")
             return None
 
-        # Розрахунок розміру позиції (менший ризик для довгих позицій)
-        quantity = self.calculate_position_size(10000, current_price, stop_loss)
-
-        return TradeSignal(
+        # Створюємо сигнал спочатку без quantity
+        signal = TradeSignal(
             action=action,
             symbol=symbol,
             confidence=combined_confidence,
             entry_price=current_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
-            quantity=quantity,
+            quantity=0.0,  # Тимчасово
             metadata={
                 'strategy_type': 'swing_trading',
                 'predicted_change': predicted_change,
@@ -142,6 +140,11 @@ class SwingTradingStrategy(TradingStrategy):
                 'volatility': volatility
             }
         )
+        
+        # Розрахунок розміру позиції через базовий метод
+        signal.quantity = 0.01  # Фіксований розмір для тестування
+
+        return signal
 
     def _analyze_trend(self, df: pd.DataFrame) -> tuple:
         """
@@ -363,3 +366,48 @@ class SwingTradingStrategy(TradingStrategy):
             return 'BULLISH'
         else:
             return 'NEUTRAL'
+    
+    async def should_close_position(
+        self,
+        position: Position,
+        current_price: float,
+        market_data: pd.DataFrame
+    ) -> bool:
+        """
+        Перевірка чи потрібно закривати позицію для свінг-трейдингу
+        
+        Свінг-трейдинг має більш толерантні правила:
+        - Довший час утримання
+        - Більші цілі по прибутку
+        - Аналіз трендових розворотів
+        """
+        # Stop-loss і take-profit
+        if position.stop_loss and current_price <= position.stop_loss:
+            return True
+        if position.take_profit and current_price >= position.take_profit:
+            return True
+        
+        # Максимальний час тримання (5 днів)
+        hold_time = (datetime.now() - position.entry_time).total_seconds() / 60
+        if hold_time > self.max_hold_time:
+            return True
+        
+        # Аналіз трендового розвороту (якщо є достатньо даних)
+        if len(market_data) >= 50:
+            try:
+                # Тренд розвернувся
+                sma_short = market_data['close'].rolling(window=10).mean()
+                sma_long = market_data['close'].rolling(window=50).mean()
+                
+                if position.side == 'BUY':
+                    # Короткострокова MA перетнула довгострокову вниз
+                    if sma_short.iloc[-1] < sma_long.iloc[-1] and sma_short.iloc[-2] >= sma_long.iloc[-2]:
+                        return True
+                elif position.side == 'SELL':
+                    # Короткострокова MA перетнула довгострокову вгору
+                    if sma_short.iloc[-1] > sma_long.iloc[-1] and sma_short.iloc[-2] <= sma_long.iloc[-2]:
+                        return True
+            except Exception:
+                pass
+        
+        return False

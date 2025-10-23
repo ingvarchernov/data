@@ -248,3 +248,37 @@ class ScalpingStrategy(TradingStrategy):
             return 'BULLISH'
         else:
             return 'NEUTRAL'
+    
+    async def should_close_position(
+        self,
+        position: Position,
+        current_price: float,
+        market_data: pd.DataFrame
+    ) -> bool:
+        """
+        Перевірка чи потрібно закривати позицію для скальпінгу
+        
+        Скальпінг має дуже жорсткі правила закриття:
+        - Швидке закриття при досягненні цілі або стоп-лосс
+        - Обмежений час тримання позиції
+        """
+        # Stop-loss і take-profit (пріоритет!)
+        if position.stop_loss and current_price <= position.stop_loss:
+            return True
+        if position.take_profit and current_price >= position.take_profit:
+            return True
+        
+        # Максимальний час тримання (критично для скальпінгу)
+        hold_time = (datetime.now() - position.entry_time).total_seconds() / 60
+        if hold_time > self.max_hold_time:
+            return True
+        
+        # Швидке закриття при маленькому прибутку (якщо час спливає)
+        if hold_time > self.max_hold_time * 0.7:  # 70% часу минуло
+            current_pnl_pct = (current_price - position.entry_price) / position.entry_price
+            if position.side == 'BUY' and current_pnl_pct > 0.003:  # 0.3% прибуток
+                return True
+            elif position.side == 'SELL' and current_pnl_pct < -0.003:
+                return True
+        
+        return False

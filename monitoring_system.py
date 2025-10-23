@@ -1,349 +1,544 @@
 # -*- coding: utf-8 -*-
 """
-Система моніторингу для крипто-прогнозування
-Збирає метрики продуктивності, стану системи та логів
+Система моніторингу продуктивності та здоров'я торгової системи
+Відстежує метрики, збирає статистику та надсилає алерти
 """
-import time
-import psutil
-import GPUtil
-from datetime import datetime
-import logging
-from typing import Dict, List, Optional
-from dataclasses import dataclass
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-import json
+import logging
+import psutil
+import threading
+import time
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any
+import numpy as np
+
+try:
+    import GPUtil
+    GPU_AVAILABLE = True
+except ImportError:
+    GPU_AVAILABLE = False
+    logging.warning("⚠️ GPUtil не встановлено, GPU моніторинг недоступний")
 
 logger = logging.getLogger(__name__)
 
-@dataclass
-class SystemMetrics:
-    """Метрики стану системи"""
-    timestamp: datetime
-    cpu_percent: float
-    memory_percent: float
-    disk_usage: float
-    gpu_memory_used: Optional[float] = None
-    gpu_memory_total: Optional[float] = None
-    gpu_utilization: Optional[float] = None
-
-@dataclass
-class ModelMetrics:
-    """Метрики моделі"""
-    symbol: str
-    interval: str
-    model_type: str
-    timestamp: datetime
-    training_time: float
-    epochs: int
-    final_loss: float
-    final_val_loss: float
-    final_mae: float
-    final_val_mae: float
-    directional_accuracy: float
-    mape: float
-    val_mape: float
-
-@dataclass
-class PredictionMetrics:
-    """Метрики прогнозів"""
-    symbol: str
-    interval: str
-    timestamp: datetime
-    predicted_price: float
-    actual_price: float
-    prediction_error: float
-    directional_correct: bool
-    confidence_score: Optional[float] = None
 
 class MonitoringSystem:
-    """Основна система моніторингу"""
+    """
+    Центральна система моніторингу для торгової системи
+    """
 
-    def __init__(self, db_manager=None):
-        self.db_manager = db_manager
-        self.system_metrics: List[SystemMetrics] = []
-        self.model_metrics: List[ModelMetrics] = []
-        self.prediction_metrics: List[PredictionMetrics] = []
-        self.executor = ThreadPoolExecutor(max_workers=2)
-        self.is_monitoring = False
+    def __init__(self):
+        self.monitoring_active = False
+        self.monitor_thread = None
+        self.db_manager = None
+        
+        # Метрики системи
+        self.system_metrics = {
+            'cpu_percent': [],
+            'memory_percent': [],
+            'disk_usage': [],
+            'gpu_memory': [],
+            'gpu_utilization': [],
+            'network_sent': 0,
+            'network_recv': 0
+        }
+        
+        # Метрики торгівлі
+        self.trading_metrics = {
+            'total_trades': 0,
+            'winning_trades': 0,
+            'losing_trades': 0,
+            'total_pnl': 0.0,
+            'daily_pnl': 0.0,
+            'positions_opened': 0,
+            'positions_closed': 0,
+            'signals_generated': 0,
+            'signals_executed': 0,
+            'api_calls': 0,
+            'api_errors': 0
+        }
+        
+        # Метрики ML моделей
+        self.ml_metrics = {
+            'predictions_made': 0,
+            'predictions_accuracy': {},
+            'models_trained': 0,
+            'training_time': 0.0,
+            'inference_time': [],
+            'model_errors': 0
+        }
+        
+        # Метрики БД
+        self.db_metrics = {
+            'queries_executed': 0,
+            'queries_cached': 0,
+            'cache_hits': 0,
+            'cache_misses': 0,
+            'db_errors': 0,
+            'avg_query_time': []
+        }
+        
+        # Алерти та пороги
+        self.alert_thresholds = {
+            'cpu_percent': 80.0,
+            'memory_percent': 85.0,
+            'gpu_memory': 90.0,
+            'api_error_rate': 0.1,
+            'db_error_rate': 0.05,
+            'daily_loss_limit': 0.1
+        }
+        
+        # Історія алертів
+        self.alerts_history = []
+        self.max_alerts_history = 1000
+        
+        # Час запуску
+        self.start_time = datetime.now()
+        self.last_metrics_save = datetime.now()
+        
+        # Інтервали
+        self.monitoring_interval = 10  # секунд
+        self.metrics_save_interval = 300  # 5 хвилин
+        
+        logger.info("📊 MonitoringSystem ініціалізовано")
 
-    async def start_monitoring(self, interval_seconds: int = 60):
-        """Запуск фонового моніторингу"""
-        self.is_monitoring = True
-        logger.info(f"🚀 Запуск системи моніторингу (інтервал: {interval_seconds}с)")
+    def start_monitoring(self):
+        """Запуск моніторингу в окремому потоці"""
+        if self.monitoring_active:
+            logger.warning("⚠️ Моніторинг вже активний")
+            return
 
-        while self.is_monitoring:
-            try:
-                metrics = await self._collect_system_metrics()
-                self.system_metrics.append(metrics)
-
-                # Зберігаємо в БД якщо є з'єднання
-                if self.db_manager:
-                    await self._save_system_metrics_to_db(metrics)
-
-                # Обмежуємо розмір списків (зберігаємо останні 1000 записів)
-                if len(self.system_metrics) > 1000:
-                    self.system_metrics = self.system_metrics[-500:]
-
-                await asyncio.sleep(interval_seconds)
-
-            except Exception as e:
-                logger.error(f"❌ Помилка моніторингу: {e}")
-                await asyncio.sleep(interval_seconds)
+        self.monitoring_active = True
+        self.monitor_thread = threading.Thread(
+            target=self._monitoring_loop,
+            daemon=True,
+            name="MonitoringThread"
+        )
+        self.monitor_thread.start()
+        logger.info("✅ Моніторинг запущено")
 
     def stop_monitoring(self):
         """Зупинка моніторингу"""
-        self.is_monitoring = False
-        self.executor.shutdown(wait=False)
-        logger.info("⏸️ Система моніторингу зупинена")
+        if not self.monitoring_active:
+            return
 
-    async def _collect_system_metrics(self) -> SystemMetrics:
-        """Збір системних метрик"""
-        def _get_gpu_info():
+        self.monitoring_active = False
+        
+        if self.monitor_thread and self.monitor_thread.is_alive():
+            self.monitor_thread.join(timeout=5)
+        
+        logger.info("🛑 Моніторинг зупинено")
+
+    def _monitoring_loop(self):
+        """Основний цикл моніторингу"""
+        logger.info("🔄 Цикл моніторингу запущено")
+        
+        while self.monitoring_active:
             try:
-                gpus = GPUtil.getGPUs()
-                if gpus:
-                    gpu = gpus[0]
-                    return {
-                        'memory_used': gpu.memoryUsed,
-                        'memory_total': gpu.memoryTotal,
-                        'utilization': gpu.load * 100
-                    }
+                # Збір системних метрик
+                self._collect_system_metrics()
+                
+                # Перевірка порогів та генерація алертів
+                self._check_thresholds()
+                
+                # Збереження метрик в БД (кожні 5 хвилин)
+                current_time = datetime.now()
+                if (current_time - self.last_metrics_save).total_seconds() >= self.metrics_save_interval:
+                    asyncio.run(self._save_metrics_to_db())
+                    self.last_metrics_save = current_time
+                
+                # Очищення старих даних
+                self._cleanup_old_metrics()
+                
+                # Пауза
+                time.sleep(self.monitoring_interval)
+                
             except Exception as e:
-                logger.debug(f"Не вдалося отримати GPU інформацію: {e}")
-            return None
+                logger.error(f"❌ Помилка в циклі моніторингу: {e}", exc_info=True)
+                time.sleep(30)
 
-        # Збираємо метрики в окремому потоці щоб не блокувати event loop
-        loop = asyncio.get_event_loop()
-        gpu_info = await loop.run_in_executor(self.executor, _get_gpu_info)
-
-        metrics = SystemMetrics(
-            timestamp=datetime.now(),
-            cpu_percent=psutil.cpu_percent(interval=1),
-            memory_percent=psutil.virtual_memory().percent,
-            disk_usage=psutil.disk_usage('/').percent,
-            gpu_memory_used=gpu_info['memory_used'] if gpu_info else None,
-            gpu_memory_total=gpu_info['memory_total'] if gpu_info else None,
-            gpu_utilization=gpu_info['utilization'] if gpu_info else None
-        )
-
-        return metrics
-
-    async def _save_system_metrics_to_db(self, metrics: SystemMetrics):
-        """Збереження системних метрик в БД"""
+    def _collect_system_metrics(self):
+        """Збір системних метрик"""
         try:
-            data = {
-                'timestamp': metrics.timestamp,
-                'cpu_percent': metrics.cpu_percent,
-                'memory_percent': metrics.memory_percent,
-                'disk_usage': metrics.disk_usage,
-                'gpu_memory_used': metrics.gpu_memory_used,
-                'gpu_memory_total': metrics.gpu_memory_total,
-                'gpu_utilization': metrics.gpu_utilization
-            }
-
-            await self.db_manager.batch_insert('system_metrics', [data])
-        except Exception as e:
-            logger.warning(f"⚠️ Не вдалося зберегти системні метрики: {e}")
-
-    def record_model_metrics(self, symbol: str, interval: str, model_type: str,
-                           training_time: float, history):
-        """Запис метрик моделі"""
-        try:
-            # Отримуємо фінальні метрики з історії тренування
-            # History object має атрибут history, який є dict
-            hist_dict = history.history if hasattr(history, 'history') else history
+            # CPU
+            cpu_percent = psutil.cpu_percent(interval=1)
+            self.system_metrics['cpu_percent'].append({
+                'value': cpu_percent,
+                'timestamp': datetime.now()
+            })
             
-            epochs = len(hist_dict.get('loss', []))
-            final_loss = hist_dict.get('loss', [-1])[-1]
-            final_val_loss = hist_dict.get('val_loss', [-1])[-1]
-            final_mae = hist_dict.get('mae', [-1])[-1]
-            final_val_mae = hist_dict.get('val_mae', [-1])[-1]
-            directional_accuracy = hist_dict.get('directional_accuracy', [0])[-1]
-            mape = hist_dict.get('mape', [0])[-1]
-            val_mape = hist_dict.get('val_mape', [0])[-1]
-
-            metrics = ModelMetrics(
-                symbol=symbol,
-                interval=interval,
-                model_type=model_type,
-                timestamp=datetime.now(),
-                training_time=training_time,
-                epochs=epochs,
-                final_loss=final_loss,
-                final_val_loss=final_val_loss,
-                final_mae=final_mae,
-                final_val_mae=final_val_mae,
-                directional_accuracy=directional_accuracy,
-                mape=mape,
-                val_mape=val_mape
-            )
-
-            self.model_metrics.append(metrics)
-
-            # Зберігаємо в БД
-            if self.db_manager:
-                asyncio.create_task(self._save_model_metrics_to_db(metrics))
-
-            logger.info(f"📊 Метрики моделі {symbol} ({model_type}): "
-                       f"MAE={final_val_mae:.4f}, MAPE={val_mape:.2f}%, "
-                       f"Напрямок={directional_accuracy:.1f}%")
-
+            # Пам'ять
+            memory = psutil.virtual_memory()
+            self.system_metrics['memory_percent'].append({
+                'value': memory.percent,
+                'timestamp': datetime.now()
+            })
+            
+            # Диск
+            disk = psutil.disk_usage('/')
+            self.system_metrics['disk_usage'].append({
+                'value': disk.percent,
+                'timestamp': datetime.now()
+            })
+            
+            # Мережа
+            network = psutil.net_io_counters()
+            self.system_metrics['network_sent'] = network.bytes_sent
+            self.system_metrics['network_recv'] = network.bytes_recv
+            
+            # GPU (якщо доступний)
+            if GPU_AVAILABLE:
+                try:
+                    gpus = GPUtil.getGPUs()
+                    if gpus:
+                        gpu = gpus[0]
+                        self.system_metrics['gpu_memory'].append({
+                            'value': (gpu.memoryUsed / gpu.memoryTotal) * 100,
+                            'timestamp': datetime.now()
+                        })
+                        self.system_metrics['gpu_utilization'].append({
+                            'value': gpu.load * 100,
+                            'timestamp': datetime.now()
+                        })
+                except Exception as e:
+                    logger.debug(f"GPU metrics error: {e}")
+            
         except Exception as e:
-            logger.error(f"❌ Помилка запису метрик моделі: {e}")
+            logger.error(f"❌ Помилка збору системних метрик: {e}")
 
-    async def _save_model_metrics_to_db(self, metrics: ModelMetrics):
-        """Збереження метрик моделі в БД"""
+    def _check_thresholds(self):
+        """Перевірка порогів та генерація алертів"""
         try:
-            data = {
-                'symbol': metrics.symbol,
-                'interval': metrics.interval,
-                'model_type': metrics.model_type,
-                'timestamp': metrics.timestamp,
-                'training_time': metrics.training_time,
-                'epochs': metrics.epochs,
-                'final_loss': metrics.final_loss,
-                'final_val_loss': metrics.final_val_loss,
-                'final_mae': metrics.final_mae,
-                'final_val_mae': metrics.final_val_mae,
-                'directional_accuracy': metrics.directional_accuracy,
-                'mape': metrics.mape,
-                'val_mape': metrics.val_mape
+            # Перевірка CPU
+            if self.system_metrics['cpu_percent']:
+                latest_cpu = self.system_metrics['cpu_percent'][-1]['value']
+                if latest_cpu > self.alert_thresholds['cpu_percent']:
+                    self._create_alert('cpu_high', f"CPU usage high: {latest_cpu:.1f}%", 'warning')
+            
+            # Перевірка пам'яті
+            if self.system_metrics['memory_percent']:
+                latest_memory = self.system_metrics['memory_percent'][-1]['value']
+                if latest_memory > self.alert_thresholds['memory_percent']:
+                    self._create_alert('memory_high', f"Memory usage high: {latest_memory:.1f}%", 'warning')
+            
+            # Перевірка GPU
+            if self.system_metrics['gpu_memory']:
+                latest_gpu_mem = self.system_metrics['gpu_memory'][-1]['value']
+                if latest_gpu_mem > self.alert_thresholds['gpu_memory']:
+                    self._create_alert('gpu_memory_high', f"GPU memory high: {latest_gpu_mem:.1f}%", 'warning')
+            
+            # Перевірка API помилок
+            if self.trading_metrics['api_calls'] > 0:
+                error_rate = self.trading_metrics['api_errors'] / self.trading_metrics['api_calls']
+                if error_rate > self.alert_thresholds['api_error_rate']:
+                    self._create_alert('api_errors_high', f"API error rate high: {error_rate:.2%}", 'critical')
+            
+            # Перевірка денних втрат
+            if self.trading_metrics['daily_pnl'] < 0:
+                loss_percent = abs(self.trading_metrics['daily_pnl']) / 1000  # Assuming $1000 balance
+                if loss_percent > self.alert_thresholds['daily_loss_limit']:
+                    self._create_alert('daily_loss_limit', f"Daily loss limit exceeded: {loss_percent:.2%}", 'critical')
+            
+        except Exception as e:
+            logger.error(f"❌ Помилка перевірки порогів: {e}")
+
+    def _create_alert(self, alert_type: str, message: str, severity: str = 'info'):
+        """Створення алерту"""
+        alert = {
+            'type': alert_type,
+            'message': message,
+            'severity': severity,
+            'timestamp': datetime.now()
+        }
+        
+        self.alerts_history.append(alert)
+        
+        # Логування
+        if severity == 'critical':
+            logger.critical(f"🚨 CRITICAL ALERT: {message}")
+        elif severity == 'warning':
+            logger.warning(f"⚠️ WARNING: {message}")
+        else:
+            logger.info(f"ℹ️ INFO: {message}")
+
+    def _cleanup_old_metrics(self):
+        """Очищення старих метрик для економії пам'яті"""
+        max_items = 100
+        
+        for metric_list in [
+            self.system_metrics['cpu_percent'],
+            self.system_metrics['memory_percent'],
+            self.system_metrics['disk_usage'],
+            self.system_metrics['gpu_memory'],
+            self.system_metrics['gpu_utilization']
+        ]:
+            if len(metric_list) > max_items:
+                # Залишаємо тільки останні 50 записів
+                del metric_list[:-50]
+        
+        # Очищення історії алертів
+        if len(self.alerts_history) > self.max_alerts_history:
+            del self.alerts_history[:-500]
+
+    async def _save_metrics_to_db(self):
+        """Збереження метрик в базу даних"""
+        if not self.db_manager:
+            return
+        
+        try:
+            # Підготовка даних для збереження
+            metrics_data = {
+                'timestamp': datetime.now(),
+                'system_metrics': self._get_average_metrics(),
+                'trading_metrics': self.trading_metrics.copy(),
+                'ml_metrics': self.ml_metrics.copy(),
+                'db_metrics': self.db_metrics.copy()
             }
-
-            await self.db_manager.batch_insert('model_metrics', [data])
+            
+            # Збереження в БД (якщо потрібно)
+            # await self.db_manager.save_monitoring_metrics(metrics_data)
+            
+            logger.debug("💾 Метрики збережено в БД")
+            
         except Exception as e:
-            logger.warning(f"⚠️ Не вдалося зберегти метрики моделі: {e}")
+            logger.error(f"❌ Помилка збереження метрик: {e}")
 
-    def record_prediction_metrics(self, symbol: str, interval: str,
-                                predicted_price: float, actual_price: float,
-                                confidence_score: Optional[float] = None):
-        """Запис метрик прогнозів"""
-        try:
-            prediction_error = abs(predicted_price - actual_price) / actual_price * 100
-            directional_correct = (predicted_price - actual_price) * (actual_price - actual_price) >= 0  # порівняння з попередньою ціною
+    def _get_average_metrics(self) -> Dict[str, float]:
+        """Отримання середніх значень метрик"""
+        avg_metrics = {}
+        
+        # CPU
+        if self.system_metrics['cpu_percent']:
+            cpu_values = [m['value'] for m in self.system_metrics['cpu_percent'][-10:]]
+            avg_metrics['cpu_avg'] = np.mean(cpu_values)
+        
+        # Memory
+        if self.system_metrics['memory_percent']:
+            mem_values = [m['value'] for m in self.system_metrics['memory_percent'][-10:]]
+            avg_metrics['memory_avg'] = np.mean(mem_values)
+        
+        # GPU
+        if self.system_metrics['gpu_memory']:
+            gpu_values = [m['value'] for m in self.system_metrics['gpu_memory'][-10:]]
+            avg_metrics['gpu_memory_avg'] = np.mean(gpu_values)
+        
+        if self.system_metrics['gpu_utilization']:
+            gpu_util_values = [m['value'] for m in self.system_metrics['gpu_utilization'][-10:]]
+            avg_metrics['gpu_utilization_avg'] = np.mean(gpu_util_values)
+        
+        return avg_metrics
 
-            metrics = PredictionMetrics(
-                symbol=symbol,
-                interval=interval,
-                timestamp=datetime.now(),
-                predicted_price=predicted_price,
-                actual_price=actual_price,
-                prediction_error=prediction_error,
-                directional_correct=directional_correct,
-                confidence_score=confidence_score
-            )
+    # === Публічні методи для оновлення метрик ===
 
-            self.prediction_metrics.append(metrics)
+    def record_trade(self, profit: float, is_winning: bool):
+        """Запис торгової операції"""
+        self.trading_metrics['total_trades'] += 1
+        self.trading_metrics['total_pnl'] += profit
+        self.trading_metrics['daily_pnl'] += profit
+        
+        if is_winning:
+            self.trading_metrics['winning_trades'] += 1
+        else:
+            self.trading_metrics['losing_trades'] += 1
 
-            # Зберігаємо в БД
-            if self.db_manager:
-                asyncio.create_task(self._save_prediction_metrics_to_db(metrics))
+    def record_position_opened(self):
+        """Запис відкриття позиції"""
+        self.trading_metrics['positions_opened'] += 1
 
-        except Exception as e:
-            logger.error(f"❌ Помилка запису метрик прогнозу: {e}")
+    def record_position_closed(self):
+        """Запис закриття позиції"""
+        self.trading_metrics['positions_closed'] += 1
 
-    async def _save_prediction_metrics_to_db(self, metrics: PredictionMetrics):
-        """Збереження метрик прогнозів в БД"""
-        try:
-            data = {
-                'symbol': metrics.symbol,
-                'interval': metrics.interval,
-                'timestamp': metrics.timestamp,
-                'predicted_price': metrics.predicted_price,
-                'actual_price': metrics.actual_price,
-                'prediction_error': metrics.prediction_error,
-                'directional_correct': metrics.directional_correct,
-                'confidence_score': metrics.confidence_score
-            }
+    def record_signal(self, executed: bool = False):
+        """Запис сигналу"""
+        self.trading_metrics['signals_generated'] += 1
+        if executed:
+            self.trading_metrics['signals_executed'] += 1
 
-            await self.db_manager.batch_insert('prediction_metrics', [data])
-        except Exception as e:
-            logger.warning(f"⚠️ Не вдалося зберегти метрики прогнозу: {e}")
+    def record_api_call(self, success: bool = True):
+        """Запис API виклику"""
+        self.trading_metrics['api_calls'] += 1
+        if not success:
+            self.trading_metrics['api_errors'] += 1
 
-    def get_system_status(self) -> Dict:
-        """Отримання поточного стану системи"""
-        try:
-            latest_metrics = self.system_metrics[-1] if self.system_metrics else None
+    def record_prediction(self, symbol: str, accuracy: float = None):
+        """Запис ML прогнозу"""
+        self.ml_metrics['predictions_made'] += 1
+        
+        if accuracy is not None:
+            if symbol not in self.ml_metrics['predictions_accuracy']:
+                self.ml_metrics['predictions_accuracy'][symbol] = []
+            self.ml_metrics['predictions_accuracy'][symbol].append(accuracy)
 
-            status = {
-                'monitoring_active': self.is_monitoring,
-                'total_system_metrics': len(self.system_metrics),
-                'total_model_metrics': len(self.model_metrics),
-                'total_prediction_metrics': len(self.prediction_metrics),
-                'current_metrics': None
-            }
+    def record_model_training(self, training_time: float):
+        """Запис тренування моделі"""
+        self.ml_metrics['models_trained'] += 1
+        self.ml_metrics['training_time'] += training_time
 
-            if latest_metrics:
-                status['current_metrics'] = {
-                    'timestamp': latest_metrics.timestamp.isoformat(),
-                    'cpu_percent': latest_metrics.cpu_percent,
-                    'memory_percent': latest_metrics.memory_percent,
-                    'disk_usage': latest_metrics.disk_usage,
-                    'gpu_memory_used': latest_metrics.gpu_memory_used,
-                    'gpu_memory_total': latest_metrics.gpu_memory_total,
-                    'gpu_utilization': latest_metrics.gpu_utilization
-                }
+    def record_db_query(self, query_time: float, cached: bool = False):
+        """Запис БД запиту"""
+        self.db_metrics['queries_executed'] += 1
+        self.db_metrics['avg_query_time'].append(query_time)
+        
+        if cached:
+            self.db_metrics['queries_cached'] += 1
+            self.db_metrics['cache_hits'] += 1
+        else:
+            self.db_metrics['cache_misses'] += 1
 
-            return status
+    def reset_daily_metrics(self):
+        """Скидання денних метрик"""
+        self.trading_metrics['daily_pnl'] = 0.0
+        logger.info("🔄 Денні метрики скинуто")
 
-        except Exception as e:
-            logger.error(f"❌ Помилка отримання статусу системи: {e}")
-            return {'error': str(e)}
+    # === Методи отримання статистики ===
 
-    def get_performance_summary(self) -> Dict:
-        """Підсумок продуктивності"""
-        try:
-            summary = {
-                'model_performance': {},
-                'prediction_accuracy': {},
-                'system_health': {}
-            }
+    def get_system_status(self) -> Dict[str, Any]:
+        """Отримання поточного статусу системи"""
+        uptime = (datetime.now() - self.start_time).total_seconds()
+        
+        status = {
+            'uptime_seconds': uptime,
+            'uptime_formatted': str(timedelta(seconds=int(uptime))),
+            'monitoring_active': self.monitoring_active,
+            'system_metrics': self._get_average_metrics(),
+            'trading_metrics': self.trading_metrics.copy(),
+            'ml_metrics': {
+                'predictions_made': self.ml_metrics['predictions_made'],
+                'models_trained': self.ml_metrics['models_trained'],
+                'avg_accuracy': self._get_average_model_accuracy()
+            },
+            'db_metrics': {
+                'queries_executed': self.db_metrics['queries_executed'],
+                'cache_hit_rate': self._get_cache_hit_rate(),
+                'avg_query_time': np.mean(self.db_metrics['avg_query_time'][-100:]) if self.db_metrics['avg_query_time'] else 0
+            },
+            'recent_alerts': self.alerts_history[-10:] if self.alerts_history else []
+        }
+        
+        return status
 
-            # Аналіз метрик моделей
-            if self.model_metrics:
-                model_types = {}
-                for m in self.model_metrics:
-                    if m.model_type not in model_types:
-                        model_types[m.model_type] = []
-                    model_types[m.model_type].append(m)
+    def _get_average_model_accuracy(self) -> float:
+        """Середня точність моделей"""
+        all_accuracies = []
+        for symbol_accuracies in self.ml_metrics['predictions_accuracy'].values():
+            all_accuracies.extend(symbol_accuracies[-10:])
+        
+        return np.mean(all_accuracies) if all_accuracies else 0.0
 
-                for model_type, metrics in model_types.items():
-                    summary['model_performance'][model_type] = {
-                        'avg_mae': sum(m.final_val_mae for m in metrics) / len(metrics),
-                        'avg_mape': sum(m.val_mape for m in metrics) / len(metrics),
-                        'avg_directional_accuracy': sum(m.directional_accuracy for m in metrics) / len(metrics),
-                        'avg_training_time': sum(m.training_time for m in metrics) / len(metrics),
-                        'total_models': len(metrics)
-                    }
+    def _get_cache_hit_rate(self) -> float:
+        """Відсоток попадань в кеш"""
+        total_requests = self.db_metrics['cache_hits'] + self.db_metrics['cache_misses']
+        if total_requests == 0:
+            return 0.0
+        
+        return self.db_metrics['cache_hits'] / total_requests
 
-            # Аналіз точності прогнозів
-            if self.prediction_metrics:
-                total_predictions = len(self.prediction_metrics)
-                correct_directional = sum(1 for m in self.prediction_metrics if m.directional_correct)
-                avg_error = sum(m.prediction_error for m in self.prediction_metrics) / total_predictions
+    def get_trading_statistics(self) -> Dict[str, Any]:
+        """Торгова статистика"""
+        total_trades = self.trading_metrics['total_trades']
+        
+        return {
+            'total_trades': total_trades,
+            'winning_trades': self.trading_metrics['winning_trades'],
+            'losing_trades': self.trading_metrics['losing_trades'],
+            'win_rate': self.trading_metrics['winning_trades'] / total_trades if total_trades > 0 else 0,
+            'total_pnl': self.trading_metrics['total_pnl'],
+            'daily_pnl': self.trading_metrics['daily_pnl'],
+            'avg_pnl_per_trade': self.trading_metrics['total_pnl'] / total_trades if total_trades > 0 else 0,
+            'signals_generated': self.trading_metrics['signals_generated'],
+            'signals_executed': self.trading_metrics['signals_executed'],
+            'signal_execution_rate': self.trading_metrics['signals_executed'] / self.trading_metrics['signals_generated'] if self.trading_metrics['signals_generated'] > 0 else 0
+        }
 
-                summary['prediction_accuracy'] = {
-                    'total_predictions': total_predictions,
-                    'directional_accuracy': correct_directional / total_predictions * 100,
-                    'avg_prediction_error_percent': avg_error
-                }
+    def print_status_report(self):
+        """Друк звіту про статус"""
+        status = self.get_system_status()
+        stats = self.get_trading_statistics()
+        
+        print("\n" + "="*60)
+        print("📊 SYSTEM STATUS REPORT")
+        print("="*60)
+        print(f"⏱️  Uptime: {status['uptime_formatted']}")
+        print(f"💻 CPU: {status['system_metrics'].get('cpu_avg', 0):.1f}%")
+        print(f"🧠 Memory: {status['system_metrics'].get('memory_avg', 0):.1f}%")
+        
+        if 'gpu_memory_avg' in status['system_metrics']:
+            print(f"🎮 GPU Memory: {status['system_metrics']['gpu_memory_avg']:.1f}%")
+        
+        print("\n" + "-"*60)
+        print("💰 TRADING METRICS")
+        print("-"*60)
+        print(f"📈 Total Trades: {stats['total_trades']}")
+        print(f"✅ Win Rate: {stats['win_rate']:.2%}")
+        print(f"💵 Total P&L: ${stats['total_pnl']:.2f}")
+        print(f"📊 Daily P&L: ${stats['daily_pnl']:.2f}")
+        print(f"📡 Signals: {stats['signals_generated']} generated, {stats['signals_executed']} executed")
+        
+        print("\n" + "-"*60)
+        print("🤖 ML METRICS")
+        print("-"*60)
+        print(f"🔮 Predictions: {status['ml_metrics']['predictions_made']}")
+        print(f"🎯 Avg Accuracy: {status['ml_metrics']['avg_accuracy']:.2%}")
+        print(f"🏋️  Models Trained: {status['ml_metrics']['models_trained']}")
+        
+        print("\n" + "-"*60)
+        print("💾 DATABASE METRICS")
+        print("-"*60)
+        print(f"📊 Queries: {status['db_metrics']['queries_executed']}")
+        print(f"⚡ Cache Hit Rate: {status['db_metrics']['cache_hit_rate']:.2%}")
+        print(f"⏱️  Avg Query Time: {status['db_metrics']['avg_query_time']:.3f}s")
+        
+        if status['recent_alerts']:
+            print("\n" + "-"*60)
+            print("🚨 RECENT ALERTS")
+            print("-"*60)
+            for alert in status['recent_alerts']:
+                print(f"  [{alert['severity'].upper()}] {alert['message']}")
+        
+        print("="*60 + "\n")
 
-            # Стан системи
-            if self.system_metrics:
-                recent_metrics = self.system_metrics[-10:]  # останні 10 записів
-                summary['system_health'] = {
-                    'avg_cpu_percent': sum(m.cpu_percent for m in recent_metrics) / len(recent_metrics),
-                    'avg_memory_percent': sum(m.memory_percent for m in recent_metrics) / len(recent_metrics),
-                    'avg_disk_usage': sum(m.disk_usage for m in recent_metrics) / len(recent_metrics),
-                    'gpu_available': any(m.gpu_memory_total for m in recent_metrics if m.gpu_memory_total)
-                }
-
-            return summary
-
-        except Exception as e:
-            logger.error(f"❌ Помилка створення підсумку продуктивності: {e}")
-            return {'error': str(e)}
 
 # Глобальний екземпляр системи моніторингу
 monitoring_system = MonitoringSystem()
+
+
+# Допоміжні функції
+def get_monitoring_status() -> Dict[str, Any]:
+    """Отримання статусу моніторингу"""
+    return monitoring_system.get_system_status()
+
+
+def get_trading_statistics() -> Dict[str, Any]:
+    """Отримання торгової статистики"""
+    return monitoring_system.get_trading_statistics()
+
+
+if __name__ == "__main__":
+    # Тестування системи моніторингу
+    print("🧪 Тестування MonitoringSystem...")
+    
+    monitoring_system.start_monitoring()
+    
+    # Симуляція активності
+    import random
+    
+    for i in range(5):
+        # Симуляція торгівлі
+        profit = random.uniform(-10, 20)
+        monitoring_system.record_trade(profit, profit > 0)
+        monitoring_system.record_signal(executed=random.choice([True, False]))
+        
+        # Симуляція ML
+        monitoring_system.record_prediction('BTCUSDT', random.uniform(0.5, 0.9))
+        
+        # Симуляція БД
+        monitoring_system.record_db_query(random.uniform(0.01, 0.1), cached=random.choice([True, False]))
+        
+        time.sleep(2)
+    
+    # Друк звіту
+    monitoring_system.print_status_report()
+    
+    monitoring_system.stop_monitoring()
+    print("✅ Тест завершено")

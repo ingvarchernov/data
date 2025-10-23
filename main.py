@@ -1,942 +1,909 @@
 # -*- coding: utf-8 -*-
 """
-Оптимізований головний модуль з новою архі        # Ініціалізація кешу
-        cache_stats = get_cache_info()
-        logger.info(f"💾 Кеш ініціалізовано: {cache_stats['memory_cache_size']} MB пам'яті, {cache_stats['redis_keys']} ключів")турою
-Інтегрує всі оптимізації: асинхронність, кешування, GPU, Rust індикатори
+Спрощений модуль торгової системи - ТІЛЬКИ BINANCE (без paper trading)
 """
-import numpy as np
-import pandas as pd
 import asyncio
 import logging
 import sys
 import os
-import time
 import argparse
-from binance_loader import save_ohlcv_to_db
-from datetime import datetime, timedelta
-from pathlib import Path
+import signal
+import pandas as pd
+from datetime import datetime
+from typing import Dict, Any, Optional
 
-# Системні модулі
 from dotenv import load_dotenv
 
-# Оптимізовані модулі
-from optimized_db import db_manager, save_technical_indicators_batch, save_normalized_data_batch, save_predictions
-from optimized_indicators import global_calculator
-from optimized_model import OptimizedPricePredictionModel, DatabaseHistoryCallback, DenormalizedMetricsCallback
-from cache_system import cache_manager, get_cache_info
-from async_architecture import ml_pipeline, init_async_system, shutdown_async_system
-from gpu_config import configure_gpu, get_gpu_info
+from intelligent_sys import UnifiedBinanceLoader, StrategyIntegration, create_strategy_integration
+from intelligent_sys.utils import calculate_signal_confidence
 from monitoring_system import monitoring_system
-from fundamental_integrator import fundamental_integrator
-# Використовуємо optimized_config замість config
-from optimized_config import SYMBOL, INTERVAL, DAYS_BACK, LOOK_BACK, STEPS, MODEL_CONFIG
+from cache_system import get_cache_info
+from gpu_config import configure_gpu, get_gpu_info
+from telegram_bot import telegram_notifier
+from async_architecture import init_async_system, shutdown_async_system, ml_pipeline
 
-# Налаштування логування
+try:
+    from binance.client import Client
+    from binance.exceptions import BinanceAPIException, BinanceRequestException
+    BINANCE_AVAILABLE = True
+except ImportError:
+    BINANCE_AVAILABLE = False
+    Client = None
+    BinanceAPIException = Exception
+    BinanceRequestException = Exception
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('optimized_app.log', encoding='utf-8'),
+        logging.FileHandler('trading_system.log', encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger(__name__)
 
-class OptimizedCryptoMLSystem:
-    """Оптимізована система прогнозування криптовалют"""
+if not BINANCE_AVAILABLE:
+    raise RuntimeError("❌ python-binance не встановлено. Встановіть: pip install python-binance")
+
+
+class SimpleTradingSystem:
+    """Спрощена торгова система - тільки Binance API"""
     
-    def __init__(self):
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
         self.initialized = False
-        self.gpu_available = False
+        self.running = False
+        self.shutdown_requested = False
         
-    async def initialize(self):
+        # Компоненти
+        self.data_loader: Optional[UnifiedBinanceLoader] = None
+        self.strategy_integration: Optional[StrategyIntegration] = None
+        self.binance_client: Optional[Client] = None
+        
+        # Торгові дані
+        self.symbols = config.get('symbols', [])
+        self.portfolio_balance = 0.0
+        self.positions: Dict[str, Dict] = {}
+        self.ml_models: Dict[str, Any] = {}
+        
+        self.api_key: Optional[str] = None
+        self.api_secret: Optional[str] = None
+
+    async def initialize(self) -> bool:
         """Ініціалізація системи"""
-        if self.initialized:
-            return
-            
-        logger.info("🚀 Ініціалізація оптимізованої системи...")
-        
-        # Завантаження змінних середовища
-        load_dotenv()
-        self._validate_environment()
-        
-        # Налаштування GPU
-        self.gpu_available = configure_gpu()
-        if self.gpu_available:
-            gpu_info = get_gpu_info()
-            logger.info(f"✅ GPU доступний: {len(gpu_info['details'])} пристроїв")
-
-        # Ініціалізація асинхронної системи
-        await init_async_system()
-
-        # Ініціалізація кешу
-        cache_stats = get_cache_info()
-        logger.info(f"� Кеш ініціалізовано: {cache_stats['memory_cache_size']} MB пам'яті, {cache_stats['redis_keys']} ключів")
-
-        # Тестування з'єднання з БД
         try:
-            await db_manager.execute_query_cached("SELECT 1 as test", use_cache=False)
-            logger.info("✅ База даних підключена")
-        except Exception as e:
-            logger.error(f"❌ Помилка з'єднання з БД: {e}")
-            raise
-
-        # Ініціалізація моніторингу та фундаментальних даних
-        monitoring_system.db_manager = db_manager
-        fundamental_integrator.db_manager = db_manager
-        fundamental_integrator.cache_manager = cache_manager
-        await fundamental_integrator.initialize()
-
-        self.initialized = True
-        logger.info("✅ Система ініціалізована успішно")
-    
-    def _validate_environment(self):
-        """Валідація змінних середовища"""
-        required_vars = ['API_KEY', 'API_SECRET', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD']
-        missing_vars = [var for var in required_vars if not os.getenv(var)]
-        
-        if missing_vars:
-            logger.error(f"❌ Відсутні змінні середовища: {', '.join(missing_vars)}")
-            raise ValueError(f"Необхідно визначити змінні: {', '.join(missing_vars)}")
-    
-    async def process_symbol_optimized(self, 
-                                     symbol: str, 
-                                     interval: str, 
-                                     days_back: int,
-                                     look_back: int,
-                                     steps: int,
-                                     force_retrain: bool = False,
-                                     use_cv: bool = False,
-                                     model_type: str = "advanced_lstm"):
-        """Оптимізована обробка символу"""
-        logger.info(f"📈 Початок обробки {symbol} ({interval})")
-        start_time = datetime.now()
-        
-        try:
-            # Кешування symbol_id та interval_id
-            cache_key = f"{symbol}_{interval}_ids"
-            cached_ids = cache_manager.get(cache_key)
+            logger.info("🚀 Ініціалізація торгової системи (Binance only)...")
             
-            if cached_ids:
-                symbol_id, interval_id = cached_ids
+            load_dotenv()
+            
+            # Отримання API ключів
+            self.api_key = os.getenv('FUTURES_API_KEY')
+            self.api_secret = os.getenv('FUTURES_API_SECRET')
+            
+            if not self.api_key or not self.api_secret:
+                raise RuntimeError("❌ FUTURES_API_KEY та FUTURES_API_SECRET обов'язкові!")
+            
+            logger.info(f"🔑 API ключ: {self.api_key[:4]}***{self.api_key[-4:]}")
+            
+            # GPU
+            gpu_available = configure_gpu()
+            if gpu_available:
+                logger.info("✅ GPU доступний")
+            
+            # Async архітектура
+            logger.info("🔧 Ініціалізація async системи...")
+            await init_async_system()
+            logger.info("✅ Async система готова")
+            
+            # Binance клієнт
+            logger.info("🔌 Підключення до Binance...")
+            use_testnet = os.getenv('USE_TESTNET', 'false').lower() in ('true', '1', 'yes')
+            self.binance_client = Client(self.api_key, self.api_secret, testnet=use_testnet)
+            
+            if use_testnet:
+                logger.info("✅ Binance TESTNET клієнт ініціалізовано")
             else:
-                symbol_id = await db_manager.get_or_create_symbol_id(symbol)
-                interval_id = await db_manager.get_or_create_interval_id(interval)
-                cache_manager.set(cache_key, (symbol_id, interval_id), ttl=86400)  # 24 години
+                logger.info("✅ Binance PRODUCTION клієнт ініціалізовано")
             
-            # Отримання даних з кешуванням
-            data = await db_manager.get_historical_data_optimized(
-                symbol_id, interval_id, days_back, use_cache=True
+            # Синхронізація балансу
+            await self._sync_balance()
+            
+            # Data loader
+            use_testnet = os.getenv('USE_TESTNET', 'false').lower() in ('true', '1', 'yes')
+            self.data_loader = UnifiedBinanceLoader(
+                api_key=self.api_key,
+                api_secret=self.api_secret,
+                testnet=use_testnet,
+                use_public_data=False
+            )
+            logger.info(f"✅ Data loader готовий (testnet={use_testnet})")
+            
+            # Синхронізація даних
+            if not self.config.get('skip_data_sync'):
+                await self._sync_market_data()
+            
+            # Стратегії
+            if self.config.get('enable_strategies'):
+                logger.info("🧠 Ініціалізація стратегій...")
+                self.strategy_integration = create_strategy_integration(
+                    symbols=self.symbols,
+                    portfolio_value=self.portfolio_balance,
+                    enable_scalping=self.config.get('enable_scalping', False),
+                    enable_day_trading=self.config.get('enable_day_trading', True),
+                    enable_swing_trading=self.config.get('enable_swing_trading', True)
+                )
+                if self.strategy_integration and self.strategy_integration.initialized:
+                    logger.info("✅ Стратегії готові")
+                else:
+                    raise RuntimeError("Не вдалося ініціалізувати стратегії")
+            
+            # Завантаження моделей
+            await self._load_models()
+            
+            self.initialized = True
+            self._print_stats()
+            
+            # Telegram повідомлення
+            await telegram_notifier.send_system_status(
+                status="запущена",
+                details=f"Баланс: ${self.portfolio_balance:.2f}\nСимволи: {', '.join(self.symbols)}"
             )
             
-            if data.empty:
-                logger.error(f"❌ Немає даних для {symbol}")
-                return None
-            
-            # Розрахунок технічних індикаторів (асинхронно)
-            indicators = await global_calculator.calculate_all_indicators_batch(data)
-            
-            # Зберігаємо оригінальні OHLCV колонки перед join
-            original_ohlcv = data[['open', 'high', 'low', 'close', 'volume']].copy()
-            
-            # Додавання індикаторів до даних
-            for name, indicator in indicators.items():
-                if len(indicator) > 0:
-                    data = data.join(indicator, how='inner', lsuffix='_orig', rsuffix=f'_{name}')
-            
-            # Відновлюємо оригінальні OHLCV колонки (join міг їх переписати)
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                if col in original_ohlcv.columns:
-                    data[col] = original_ohlcv[col]
-            
-            # Очищення від NaN
-            initial_count = len(data)
-            data = data.dropna()
-            if len(data) < initial_count:
-                logger.info(f"🧹 Видалено NaN: {initial_count} → {len(data)} записів")
-            else:
-                logger.info(f"✓ Дані без NaN: {len(data)} записів")
-
-            # ДОДАВАННЯ ДОДАТКОВИХ СТАТИСТИЧНИХ ФІЧЕЙ
-            # ...existing code...
-            
-            # ВИДАЛЕННЯ OUTLIERS - критичний крок для якості даних
-            outliers_start = len(data)
-            logger.info(f"🔍 Видалення outliers з {outliers_start} записів...")
-
-            # Видаляємо екстремальні значення цін (більше 10 стандартних відхилень)
-            price_cols = ['close', 'high', 'low', 'open']
-            for col in price_cols:
-                if col in data.columns:
-                    mean_price = data[col].mean()
-                    std_price = data[col].std()
-                    # Видаляємо значення, які відхиляються більше ніж на 5 стандартних відхилень
-                    data = data[abs(data[col] - mean_price) <= 5 * std_price]
-
-            # Видаляємо екстремальні об'єми (більше 10 стандартних відхилень)
-            if 'volume' in data.columns:
-                vol_mean = data['volume'].mean()
-                vol_std = data['volume'].std()
-                data = data[abs(data['volume'] - vol_mean) <= 10 * vol_std]
-
-            # Видаляємо екстремальні значення індикаторів
-            indicator_cols = ['RSI', 'MACD', 'ATR', 'Stoch_K', 'Stoch_D', 'Williams_R', 'CCI', 'ADX']
-            for col in indicator_cols:
-                if col in data.columns:
-                    # RSI має бути між 0-100, інші індикатори мають розумні межі
-                    if col == 'RSI':
-                        data = data[(data[col] >= 0) & (data[col] <= 100)]
-                    elif col in ['Stoch_K', 'Stoch_D']:
-                        data = data[(data[col] >= -20) & (data[col] <= 120)]  # Stochastic може виходити за 0-100
-                    elif col == 'Williams_R':
-                        data = data[(data[col] >= -100) & (data[col] <= 0)]  # Williams %R від -100 до 0
-                    else:
-                        # Для інших індикаторів видаляємо екстремальні значення
-                        col_mean = data[col].mean()
-                        col_std = data[col].std()
-                        data = data[abs(data[col] - col_mean) <= 5 * col_std]
-
-            outliers_removed = outliers_start - len(data)
-            if outliers_removed > 0:
-                logger.info(f"🧹 Видалено outliers: {outliers_start} → {len(data)} записів (-{outliers_removed})")
-            else:
-                logger.info(f"✓ Outliers не знайдено: {len(data)} записів")
-            
-            if len(data) < look_back:
-                logger.error(f"❌ Недостатньо даних після обробки: {len(data)} < {look_back}")
-                return None
-            
-            # ДОДАТКОВІ СТАТИСТИЧНІ ФІЧІ
-            # Rolling statistics для ціни
-            data['close_rolling_mean_10'] = data['close'].rolling(10).mean()
-            data['close_rolling_std_10'] = data['close'].rolling(10).std()
-            data['close_rolling_skew_20'] = data['close'].rolling(20).skew()
-            data['close_rolling_kurt_20'] = data['close'].rolling(20).kurt()
-            
-            # Volume-based features
-            if 'volume' in data.columns:
-                data['volume_rolling_mean_10'] = data['volume'].rolling(10).mean()
-                data['volume_rolling_std_10'] = data['volume'].rolling(10).std()
-                data['volume_to_price_ratio'] = data['volume'] / (data['close'] + 1e-6)
-                data['volume_change'] = data['volume'].pct_change().fillna(0)
-            
-            # RSI-based features
-            if 'RSI' in data.columns:
-                data['rsi_overbought'] = (data['RSI'] > 70).astype(int)
-                data['rsi_oversold'] = (data['RSI'] < 30).astype(int)
-                data['rsi_divergence'] = data['RSI'].diff(5)  # 5-period RSI change
-            
-            # MACD-based features
-            if 'MACD' in data.columns and 'MACD_Signal' in data.columns:
-                data['macd_histogram'] = data['MACD'] - data['MACD_Signal']
-                data['macd_crossover'] = np.where(data['MACD'] > data['MACD_Signal'], 1, -1)
-                data['macd_trend'] = data['macd_histogram'].rolling(5).mean()
-            
-            # Bollinger Bands advanced features
-            if 'BB_Upper' in data.columns and 'BB_Lower' in data.columns:
-                data['bb_squeeze'] = (data['BB_Upper'] - data['BB_Lower']) / data['close']
-                data['bb_breakout_up'] = (data['close'] > data['BB_Upper']).astype(int)
-                data['bb_breakout_down'] = (data['close'] < data['BB_Lower']).astype(int)
-            
-            # Stochastic features
-            if 'Stoch_K' in data.columns and 'Stoch_D' in data.columns:
-                data['stoch_divergence'] = data['Stoch_K'] - data['Stoch_D']
-                data['stoch_overbought'] = (data['Stoch_K'] > 80).astype(int)
-                data['stoch_oversold'] = (data['Stoch_K'] < 20).astype(int)
-            
-            # ATR-based volatility features
-            if 'ATR' in data.columns:
-                data['atr_ratio'] = data['ATR'] / data['close']
-                data['atr_change'] = data['ATR'].pct_change().fillna(0)
-            
-            # Price action patterns
-            data['doji'] = abs(data['close'] - data['open']) / (data['high'] - data['low'] + 1e-6) < 0.1
-            data['hammer'] = ((data['high'] - data['low'] > 0) & 
-                            (abs(data['open'] - data['close']) < 0.3 * (data['high'] - data['low'])) & 
-                            ((data['low'] - data['close']) > 0.6 * (data['high'] - data['low']))).astype(int)
-            
-            # Time-based features (якщо є timestamp)
-            if 'timestamp' in data.columns:
-                # Конвертуємо timestamp правильно (Unix timestamp в мілісекундах)
-                # Перевіряємо тільки якщо це числа
-                if pd.api.types.is_numeric_dtype(data['timestamp']):
-                    if data['timestamp'].max() > 1e10:  # Мілісекунди
-                        data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
-                    else:  # Секунди або вже datetime
-                        data['timestamp'] = pd.to_datetime(data['timestamp'])
-                
-                data['hour'] = data['timestamp'].dt.hour
-                data['day_of_week'] = data['timestamp'].dt.dayofweek
-                data['month'] = data['timestamp'].dt.month
-                # Циклічні features для часу
-                data['hour_sin'] = np.sin(2 * np.pi * data['hour'] / 24)
-                data['hour_cos'] = np.cos(2 * np.pi * data['hour'] / 24)
-                data['dow_sin'] = np.sin(2 * np.pi * data['day_of_week'] / 7)
-                data['dow_cos'] = np.cos(2 * np.pi * data['day_of_week'] / 7)
-            
-            # Розширений список фічей для кращого навчання
-            strategic_features = [
-                # Basic OHLCV
-                'close', 'volume', 'high', 'low', 'open',
-                
-                # Technical indicators
-                'RSI', 'MACD', 'MACD_Signal', 'ATR', 'EMA_20', 'EMA_10', 'EMA_50',
-                'Stoch_K', 'Stoch_D', 'Williams_R', 'CCI',
-                
-                # Price-based features
-                'trend', 'volatility', 'return', 'momentum', 'momentum_10', 'momentum_20',
-                'return_5', 'return_10', 'close_lag1', 'close_lag2', 'close_diff', 'log_return',
-                'close_rolling_mean_10', 'close_rolling_std_10', 'close_rolling_skew_20', 'close_rolling_kurt_20',
-                
-                # Volume features
-                'volume_pct', 'volume_ma5', 'volume_ma20', 'volume_std',
-                'volume_rolling_mean_10', 'volume_rolling_std_10', 'volume_to_price_ratio', 'volume_change',
-                
-                # Bollinger Bands
-                'bb_dist_upper', 'bb_dist_lower', 'bb_width', 'bb_position', 'bb_squeeze', 'bb_breakout_up', 'bb_breakout_down',
-                
-                # RSI features
-                'rsi_overbought', 'rsi_oversold', 'rsi_divergence',
-                
-                # MACD features
-                'macd_histogram', 'macd_crossover', 'macd_trend',
-                
-                # Stochastic features
-                'stoch_divergence', 'stoch_overbought', 'stoch_oversold',
-                
-                # ATR features
-                'atr_ratio', 'atr_change',
-                
-                # Price action patterns
-                'doji', 'hammer', 'high_low_ratio', 'close_open_ratio',
-                
-                # Time features (if available)
-                'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos'
-            ]
-            feature_columns = [f for f in strategic_features if f in data.columns]
-            
-            # Логування після визначення фічей
-            logger.info(f"📊 Фінальний датасет: {len(data)} записів, {len(feature_columns)} фічей")
-            
-            # Видаляємо NaN після lag-фічей та перевіряємо на Inf
-            data = data.replace([np.inf, -np.inf], np.nan)
-            data = data.dropna()
-            
-            if len(data) < look_back:
-                logger.error(f"❌ Недостатньо даних після обробки: {len(data)} < {look_back}")
-                return None
-            
-            logger.info(f"📊 Фінальний датасет: {len(data)} записів, {len(feature_columns)} фічей")
-            
-            # ЗБІР ФУНДАМЕНТАЛЬНИХ ДАНИХ
-            fundamental_start = len(feature_columns)
-            logger.info(f"📰 Збір фундаментальних даних для {symbol}...")
-            try:
-                # Встановлюємо timestamp як індекс для технічних даних
-                if 'timestamp' in data.columns:
-                    data.set_index('timestamp', inplace=True)
-                    logger.info(f"📅 Встановлено timestamp як індекс для {len(data)} записів")
-                
-                # Отримуємо період даних для збору фундаментальних даних
-                data_start_time = data.index.min()
-                data_end_time = data.index.max()
-                hours_back = int((data_end_time - data_start_time).total_seconds() / 3600)
-                
-                # Збираємо фундаментальні дані за період технічних даних
-                fundamental_data = await fundamental_integrator.collect_fundamental_data_for_period(
-                    symbol, data_start_time, data_end_time
-                )
-                
-                if fundamental_data:
-                    logger.info(f"📊 Зібрано {len(fundamental_data)} фундаментальних записів")
-                    
-                    # Отримуємо фундаментальні ознаки для періоду даних
-                    start_time = data.index.min()
-                    end_time = data.index.max()
-                    
-                    fundamental_df = await fundamental_integrator.get_fundamental_features(
-                        symbol, start_time, end_time
-                    )
-                    
-                    if not fundamental_df.empty:
-                        # Комбінуємо технічні та фундаментальні дані
-                        data = fundamental_integrator.combine_with_technical_data(data, fundamental_df)
-                        logger.info(f"🔗 Поєднано технічні та фундаментальні дані: {len(data)} записів")
-                        
-                        # Оновлюємо feature_columns з фундаментальними ознаками
-                        fundamental_features = [
-                            'aggregate_sentiment', 'news_sentiment_score', 'social_sentiment_score',
-                            'active_addresses', 'transaction_count', 'whale_activity'
-                        ]
-                        feature_columns.extend([f for f in fundamental_features if f in data.columns])
-                        
-                        features_added = len(feature_columns) - fundamental_start
-                        logger.info(f"📊 Фундаментальні фічі: {fundamental_start} → {len(feature_columns)} (+{features_added})")
-                    else:
-                        logger.warning(f"⚠️ Немає фундаментальних даних для {symbol} в періоді {start_time} - {end_time}")
-                else:
-                    logger.warning(f"⚠️ Не вдалося зібрати фундаментальні дані для {symbol}")
-                    
-            except Exception as e:
-                logger.warning(f"⚠️ Помилка збору фундаментальних даних: {e}")
-                # Продовжуємо без фундаментальних даних
-            
-            # ЗБЕРЕЖЕННЯ ТЕХНІЧНИХ ІНДИКАТОРІВ В БД
-            try:
-                await save_technical_indicators_batch(db_manager, symbol, interval, data)
-            except Exception as e:
-                logger.warning(f"⚠️ Не вдалося зберегти технічні індикатори: {e}")
-            
-            # Time-series validation: використовуємо СЕРЕДНІ 20% як валідацію (не останні!)
-            # Для фінансових даних краще використовувати дані з середини періоду
-            # щоб уникнути проблем з різними ринковими умовами
-
-            # Розділяємо на train/val/test: 60% / 20% / 20%
-            n_total = len(data)
-            train_end = int(n_total * 0.6)
-            val_end = int(n_total * 0.8)
-
-            train_data = data.iloc[:train_end]
-            val_data = data.iloc[train_end:val_end]
-            # test_data = data.iloc[val_end:]  # зарезервовано для фінального тестування
-
-            logger.info(f"📊 Хронологічний розподіл: Train={len(train_data)}, Val={len(val_data)} (60%/20%)")
-            
-            X_train_raw = train_data[feature_columns].values
-            X_val_raw = val_data[feature_columns].values
-
-            # ВАЖЛИВО: RobustScaler краще для trending фінансових даних
-            # Використовує медіану та IQR замість min/max, стійкий до outliers
-            from sklearn.preprocessing import RobustScaler
-            scaler = RobustScaler()
-            X_train_scaled = scaler.fit_transform(X_train_raw)
-            X_val_scaled = scaler.transform(X_val_raw)  # transform, НЕ fit_transform!
-            
-            # RobustScaler використовує center_ та scale_ замість min/max
-            close_idx_feat = feature_columns.index('close')
-            logger.info(f"✓ Scaler: train close center={scaler.center_[close_idx_feat]:.2f}, scale={scaler.scale_[close_idx_feat]:.2f}")
-
-            # Створення послідовностей для train
-            X_train_sequences = []
-            for i in range(len(X_train_scaled) - look_back):
-                X_train_sequences.append(X_train_scaled[i:i + look_back])
-            X_train_sequences = np.array(X_train_sequences)
-            
-            # Data Augmentation для покращення генералізації
-            def augment_training_data(X_sequences, y_targets, augmentation_factor=2):
-                """Додаємо шум та невеликі perturbation до тренувальних даних"""
-                augmented_sequences = [X_sequences]
-                augmented_targets = [y_targets]
-                
-                for _ in range(augmentation_factor - 1):
-                    # Додаємо гаусівський шум (0.5% від std кожного feature)
-                    noise = np.random.normal(0, 0.005, X_sequences.shape)
-                    noisy_sequences = X_sequences + noise * np.std(X_sequences, axis=(0, 1), keepdims=True)
-                    
-                    # Невеликі часові зсуви (1-2 кроки)
-                    shift_amount = np.random.randint(-1, 2, size=X_sequences.shape[0])  # -1, 0, або 1
-                    
-                    shifted_sequences = np.zeros_like(X_sequences)
-                    for i, shift in enumerate(shift_amount):
-                        if shift > 0:
-                            shifted_sequences[i, shift:] = noisy_sequences[i, :-shift]
-                            shifted_sequences[i, :shift] = noisy_sequences[i, 0]  # повторюємо перший елемент
-                        elif shift < 0:
-                            shifted_sequences[i, :shift] = noisy_sequences[i, -shift:]
-                            shifted_sequences[i, shift:] = noisy_sequences[i, -1]  # повторюємо останній елемент
-                        else:
-                            shifted_sequences[i] = noisy_sequences[i]
-                    
-                    augmented_sequences.append(shifted_sequences)
-                    augmented_targets.append(y_targets)  # цілі залишаються ті ж
-                
-                # Об'єднуємо всі augmented дані
-                X_augmented = np.concatenate(augmented_sequences, axis=0)
-                y_augmented = np.concatenate(augmented_targets, axis=0)
-                
-                # Перемішуємо
-                indices = np.random.permutation(len(X_augmented))
-                return X_augmented[indices], y_augmented[indices]
-            
-            # Створення послідовностей для val (без augmentation)
-            X_val_sequences = []
-            for i in range(len(X_val_scaled) - look_back):
-                X_val_sequences.append(X_val_scaled[i:i + look_back])
-            X_val_sequences = np.array(X_val_sequences)
-            
-            # Цільові змінні - абсолютні ціни (close), а не різниці
-            close_idx = feature_columns.index('close')
-            y_train = X_train_scaled[look_back:, close_idx]  # наступні абсолютні ціни
-            y_val = X_val_scaled[look_back:, close_idx]
-
-            # Застосовуємо augmentation тільки до тренувальних даних
-            X_train_sequences, y_train = augment_training_data(X_train_sequences, y_train, augmentation_factor=3)
-            logger.info(f"🔄 Data augmentation: {len(X_train_sequences)} тренувальних семплів (було {len(X_train_scaled) - look_back})")
-
-            # Перевіряємо, чи співпадають розміри після augmentation
-            expected_train_len = len(X_train_sequences)
-            expected_val_len = len(X_val_scaled) - look_back
-            
-            if len(y_train) != expected_train_len or len(y_val) != expected_val_len:
-                logger.error(f"❌ Розмірність y не співпадає: y_train={len(y_train)}, expected={expected_train_len}")
-                return None
-            
-            X_sequences = X_train_sequences  # Для сумісності з наступним кодом            X_sequences = X_train_sequences  # Для сумісності з наступним кодом
-            
-            # Для prediction потрібні всі дані разом
-            X_data = data[feature_columns].values
-            X_all_scaled = scaler.transform(X_data)  # transform використовуючи train scaler
-            
-            # ЗБЕРЕЖЕННЯ НОРМАЛІЗОВАНИХ ДАНИХ В БД
-            try:
-                # Створюємо DataFrame з нормалізованими даними для збереження
-                normalized_data_df = data.reset_index().copy()  # reset_index щоб timestamp став колонкою
-                
-                # Додаємо нормалізовані значення як нові колонки
-                for i, feature in enumerate(feature_columns):
-                    normalized_data_df[f'{feature}_normalized'] = X_all_scaled[:, i]
-                
-                await save_normalized_data_batch(db_manager, symbol, interval, normalized_data_df)
-            except Exception as e:
-                logger.warning(f"⚠️ Не вдалося зберегти нормалізовані дані: {e}")
-            
-            if len(X_sequences) == 0:
-                logger.error("❌ Не вдалося створити послідовності")
-                return None
-            
-            # 4. Тренування/завантаження моделі
-
-            model_path = f"models/optimized_{symbol}_{interval}.keras"
-
-            retrain = force_retrain or not Path(model_path).exists()
-            # Перевірка input_shape у метаданих
-            metadata_path = model_path.replace('.keras', '_metadata.json')
-            if not retrain and Path(metadata_path).exists():
-                import json
-                with open(metadata_path, 'r') as f:
-                    meta = json.load(f)
-                old_shape = tuple(meta.get('data_shape', [0, 0]))
-                new_shape = X_sequences.shape
-                if old_shape != new_shape:
-                    logger.info("⚠️ Input shape змінився, перетренування моделі...")
-                    retrain = True
-
-            if retrain:
-                logger.info("🤖 Тренування нової моделі...")
-                close_index = feature_columns.index('close')
-                
-                model_builder = OptimizedPricePredictionModel(
-                    input_shape=(look_back, len(feature_columns)),
-                    model_type=model_type,
-                    scaler=scaler,
-                    feature_index=close_index
-                )
-                
-                # Використовуємо вже підготовлені X_train_sequences, X_val_sequences, y_train, y_val
-                X_train = X_train_sequences.astype(np.float32)
-                X_val = X_val_sequences.astype(np.float32)
-                y_train = y_train.astype(np.float32)
-                y_val = y_val.astype(np.float32)
-                
-                # Логування статистики цільової змінної
-                logger.info(f"y_train: min={y_train.min():.4f}, max={y_train.max():.4f}, mean={y_train.mean():.4f}, std={y_train.std():.4f}")
-                logger.info(f"y_val: min={y_val.min():.4f}, max={y_val.max():.4f}, mean={y_val.mean():.4f}, std={y_val.std():.4f}")
-                
-                # Перевірка на NaN/Inf
-                if np.isnan(y_train).any() or np.isnan(y_val).any():
-                    logger.error("❌ y_train або y_val містить NaN!")
-                    return None
-                if np.isinf(y_train).any() or np.isinf(y_val).any():
-                    logger.error("❌ y_train або y_val містить Inf!")
-                    return None
-                
-                # Створюємо callback для збереження в БД
-                db_callback = DatabaseHistoryCallback(
-                    db_engine=db_manager.sync_engine,
-                    symbol_id=symbol_id,
-                    interval_id=interval_id,
-                    fold=1
-                )
-                
-                # Створюємо callback для виводу денормалізованих метрик
-                denorm_callback = DenormalizedMetricsCallback(
-                    scaler=scaler,
-                    feature_index=feature_columns.index('close'),
-                    X_val=X_val,
-                    y_val=y_val
-                )
-                
-                # Використовуємо параметри з optimized_config
-                start_training_time = time.time()
-                model, history = model_builder.train_model(
-                    X_train, y_train, X_val, y_val,
-                    model_save_path=model_path,
-                    epochs=MODEL_CONFIG['epochs'],
-                    batch_size=MODEL_CONFIG['batch_size'],
-                    learning_rate=MODEL_CONFIG['learning_rate'],
-                    db_callback=db_callback,
-                    additional_callbacks=[denorm_callback]
-                )
-                training_time = time.time() - start_training_time
-                
-                # Записуємо метрики моделі в систему моніторингу
-                monitoring_system.record_model_metrics(
-                    symbol=symbol,
-                    interval=interval,
-                    model_type=model_type,
-                    training_time=training_time,
-                    history=history
-                )
-                # Зберігаємо метадані з параметрами scaler
-                scaler_params = {}
-                if hasattr(scaler, 'data_min_'):
-                    # MinMaxScaler
-                    scaler_params = {
-                        'type': 'MinMaxScaler',
-                        'min': scaler.data_min_.tolist(),
-                        'max': scaler.data_max_.tolist()
-                    }
-                elif hasattr(scaler, 'center_'):
-                    # RobustScaler або StandardScaler
-                    scaler_type = type(scaler).__name__
-                    scaler_params = {
-                        'type': scaler_type,
-                        'center': scaler.center_.tolist(),
-                        'scale': scaler.scale_.tolist()
-                    }
-                
-                metadata = {
-                    'symbol': symbol,
-                    'interval': interval,
-                    'features': feature_columns,
-                    'scaler_params': scaler_params,
-                    'trained_at': datetime.now().isoformat(),
-                    'data_shape': X_sequences.shape,
-                    'model_type': model_type
-                }
-                model_builder.save_model_with_metadata(model, model_path, metadata)
-            else:
-                logger.info("📥 Завантаження існуючої моделі...")
-                model_builder = OptimizedPricePredictionModel(
-                    input_shape=(look_back, len(feature_columns)),
-                    model_type=model_type,
-                    scaler=scaler,
-                    feature_index=feature_columns.index('close')
-                )
-                model = model_builder.load_model_with_metadata(model_path)
-                
-                # Якщо модель завантажена без компіляції, перекомпілюємо її
-                if not model.compiled:
-                    logger.info("🔧 Модель не скомпільована, компілюємо...")
-                    model = model_builder.recompile_loaded_model(model)
-            
-            # 5. Прогнозування
-            logger.info("🔮 Генерація прогнозів...")
-            
-            # ЗБІР СВІЖИХ ФУНДАМЕНТАЛЬНИХ ДАНИХ ДЛЯ ПРОГНОЗУВАННЯ
-            logger.info(f"📰 Збір свіжих фундаментальних даних для прогнозу {symbol}...")
-            try:
-                # Збираємо свіжі фундаментальні дані (останні 24 години)
-                fresh_fundamental_list = await fundamental_integrator.collect_fundamental_data_for_period(
-                    symbol, 
-                    datetime.now() - timedelta(hours=24), 
-                    datetime.now()
-                )
-                
-                if fresh_fundamental_list:
-                    # Конвертуємо список в DataFrame для обробки
-                    fresh_fundamental_data = []
-                    for feature in fresh_fundamental_list:
-                        fresh_fundamental_data.append({
-                            'timestamp': feature.timestamp,
-                            'aggregate_sentiment': feature.aggregate_sentiment,
-                            'news_sentiment_score': feature.news_sentiment_score,
-                            'social_sentiment_score': feature.social_sentiment_score,
-                            'active_addresses': feature.active_addresses,
-                            'transaction_count': feature.transaction_count,
-                            'whale_activity': feature.whale_activity
-                        })
-                    
-                    latest_fundamental = pd.DataFrame(fresh_fundamental_data)
-                    
-                    if not latest_fundamental.empty:
-                        # Покращена обробка фундаментальних даних з часовою інтерполяцією
-                        fundamental_features = ['aggregate_sentiment', 'news_sentiment_score', 'social_sentiment_score',
-                                              'active_addresses', 'transaction_count', 'whale_activity']
-                        
-                        # Створюємо часову сітку для останніх look_back періодів
-                        last_timestamps = data.index[-look_back:]
-                        
-                        # Інтерполюємо фундаментальні дані по часу
-                        for feature in fundamental_features:
-                            if feature in data.columns and feature in latest_fundamental.columns:
-                                # Використовуємо resample та interpolate для плавного переходу
-                                feature_series = latest_fundamental.set_index('timestamp')[feature]
-                                
-                                # Створюємо серію з тими ж timestamp що й останні дані
-                                interpolated_feature = feature_series.reindex(last_timestamps, method='ffill').fillna(method='bfill').fillna(0.0)
-                                
-                                # Додаємо невеликий шум для реалістичності (але менший ніж в тренуванні)
-                                noise_level = 0.001  # 0.1% шум
-                                noise = np.random.normal(0, noise_level * interpolated_feature.std(), len(interpolated_feature))
-                                interpolated_feature = interpolated_feature + noise
-                                
-                                # Оновлюємо дані
-                                data.loc[last_timestamps, feature] = interpolated_feature.values
-                        
-                        # Перераховуємо нормалізовані дані з оновленими фундаментальними ознаками
-                        X_data_updated = data[feature_columns].values
-                        X_all_scaled = scaler.transform(X_data_updated)
-                        
-                        logger.info(f"🔄 Оновлено дані інтерпольованими фундаментальними ознаками з часовою сіткою")
-                    else:
-                        logger.warning(f"⚠️ Немає свіжих фундаментальних даних для прогнозу")
-                else:
-                    logger.warning(f"⚠️ Не вдалося зібрати свіжі фундаментальні дані")
-                    
-            except Exception as e:
-                logger.warning(f"⚠️ Помилка збору свіжих фундаментальних даних: {e}")
-                # Продовжуємо з існуючими даними
-            
-            # Беремо останні дані для прогнозування
-            last_sequence = X_all_scaled[-look_back:].reshape(1, look_back, len(feature_columns))
-            
-            predictions = []
-            current_sequence = last_sequence.copy()
-
-            for step in range(steps):
-                # Модель передбачає нормалізовану абсолютну ціну
-                pred_scaled = model.predict(current_sequence, verbose=0)[0, 0]
-
-                # Денормалізуємо передбачену ціну
-                dummy = np.zeros((1, len(feature_columns)))
-                dummy[0, close_idx] = pred_scaled
-                predicted_price = scaler.inverse_transform(dummy)[0, close_idx]
-
-                predictions.append(float(predicted_price))
-
-                # Оновлюємо послідовність для наступного прогнозу
-                new_row = current_sequence[0, -1, :].copy()
-                new_row[close_idx] = pred_scaled  # Використовуємо нормалізовану передбачену ціну
-                current_sequence = np.roll(current_sequence, -1, axis=1)
-                current_sequence[0, -1, :] = new_row
-            
-            # Денормалізація прогнозів - просто використовуємо вже денормалізовані ціни
-            predictions_denorm = predictions
-            
-            # 6. Збереження результатів
-            # Денормалізуємо останню ціну (inverse scaler)
-            last_scaled = scaler.inverse_transform([X_all_scaled[-1]])[0]
-            last_price_denorm = last_scaled[feature_columns.index('close')]
-            
-            results = {
-                'symbol': symbol,
-                'interval': interval,
-                'timestamp': datetime.now().isoformat(),
-                'last_price': last_price_denorm,
-                'predictions': predictions_denorm,
-                'steps': steps,
-                'processing_time': (datetime.now() - start_time).total_seconds()
-            }
-            
-            # Кешування результатів
-            cache_key = f"predictions:{symbol}:{interval}:{steps}"
-            cache_manager.set(cache_key, results, ttl=1800)
-            
-            # ЗБЕРЕЖЕННЯ ПРОГНОЗІВ В БД
-            try:
-                await save_predictions(db_manager, symbol, interval, predictions_denorm, last_price_denorm)
-            except Exception as e:
-                logger.warning(f"⚠️ Не вдалося зберегти прогнози: {e}")
-            
-            # Записуємо метрики прогнозів в систему моніторингу
-            for i, predicted_price in enumerate(predictions_denorm):
-                monitoring_system.record_prediction_metrics(
-                    symbol=symbol,
-                    interval=interval,
-                    predicted_price=predicted_price,
-                    actual_price=last_price_denorm,  # Використовуємо останню відому ціну як базову
-                    confidence_score=None
-                )
-            
-            logger.info(f"🔮 Прогнози: {[f'{p:.2f}' for p in predictions_denorm]}")
-            
-            return results
+            logger.info("✅ Система повністю готова")
+            return True
             
         except Exception as e:
-            logger.error(f"❌ Помилка обробки {symbol}: {e}", exc_info=True)
-            return None
+            logger.error(f"❌ Помилка ініціалізації: {e}", exc_info=True)
+            return False
     
-    async def batch_process_symbols(self, symbols: list, model_type: str = "advanced_lstm", **kwargs):
-        """Пакетна обробка символів"""
-        logger.info(f"🔄 Пакетна обробка {len(symbols)} символів з моделлю {model_type}")
-        
-        # Створюємо задачі для паралельного виконання
-        tasks = []
-        for symbol in symbols:
-            task = self.process_symbol_optimized(symbol, model_type=model_type, **kwargs)
-            tasks.append(task)
-        
-        # Виконуємо паралельно з обмеженням
-        semaphore = asyncio.Semaphore(3)  # Максимум 3 символи одночасно
-        
-        async def limited_process(task):
-            async with semaphore:
-                return await task
-        
-        limited_tasks = [limited_process(task) for task in tasks]
-        results = await asyncio.gather(*limited_tasks, return_exceptions=True)
-        
-        # Обробка результатів
-        successful = sum(1 for r in results if r is not None and not isinstance(r, Exception))
-        failed = len(results) - successful
-        
-        logger.info(f"✅ Пакетна обробка завершена: {successful} успішно, {failed} з помилками")
-        
-        return results
+    async def _sync_balance(self):
+        """Синхронізація балансу з Binance"""
+        try:
+            logger.info("💰 Синхронізація балансу...")
+            account = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.binance_client.futures_account()
+            )
+            self.portfolio_balance = float(account['totalWalletBalance'])
+            available = float(account.get('availableBalance', self.portfolio_balance))
+            logger.info(f"✅ Баланс: ${self.portfolio_balance:.2f} USDT (доступно: ${available:.2f})")
+            
+            if self.strategy_integration:
+                self.strategy_integration.update_portfolio_value(self.portfolio_balance)
+                
+        except Exception as e:
+            logger.error(f"❌ Помилка синхронізації балансу: {e}")
+            raise
     
-    async def get_system_status(self):
-        """Отримання статусу системи"""
-        return {
-            'initialized': self.initialized,
-            'gpu_available': self.gpu_available,
-            'gpu_info': get_gpu_info() if self.gpu_available else None,
-            'cache_stats': get_cache_info(),
-            'worker_stats': ml_pipeline.worker_pool.get_stats() if ml_pipeline.worker_pool else None,
-            'monitoring_status': monitoring_system.get_system_status(),
-            'performance_summary': monitoring_system.get_performance_summary(),
-            'timestamp': datetime.now().isoformat()
+    async def _sync_market_data(self):
+        """Синхронізація ринкових даних"""
+        from optimized_db import db_manager
+        
+        logger.info("📥 Синхронізація ринкових даних...")
+        for symbol in self.symbols:
+            try:
+                saved = await self.data_loader.save_to_database(
+                    db_manager, symbol, '1h', 7
+                )
+                logger.info(f"✅ {symbol}: {saved} записів")
+            except Exception as e:
+                logger.warning(f"⚠️ {symbol}: {e}")
+    
+    async def _load_models(self):
+        """Завантаження ML моделей"""
+        logger.info("🤖 Завантаження ML моделей...")
+        from optimized_model import OptimizedPricePredictionModel
+        
+        for symbol in self.symbols:
+            model_path = f'models/{symbol}_best_model.h5'
+            if os.path.exists(model_path):
+                try:
+                    model = OptimizedPricePredictionModel(
+                        input_shape=(60, 20),
+                        model_type='advanced_lstm'
+                    )
+                    model.load_model(model_path)
+                    self.ml_models[symbol] = model
+                    logger.info(f"✅ {symbol}: модель завантажена")
+                except Exception as e:
+                    logger.warning(f"⚠️ {symbol}: {e}")
+            else:
+                logger.warning(f"⚠️ {symbol}: модель не знайдена")
+    
+    def _print_stats(self):
+        """Виведення статистики"""
+        logger.info("=" * 60)
+        logger.info("📊 СТАТИСТИКА СИСТЕМИ")
+        logger.info("=" * 60)
+        logger.info(f"💰 Баланс: ${self.portfolio_balance:.2f}")
+        logger.info(f"💹 Символи: {len(self.symbols)}")
+        logger.info(f"🤖 Моделі: {len(self.ml_models)}/{len(self.symbols)}")
+        if self.strategy_integration:
+            perf = self.strategy_integration.get_performance_summary()
+            logger.info(f"🎯 Стратегії: {perf.get('active_strategies', 0)}")
+        logger.info("=" * 60)
+    
+    async def run(self):
+        """Головний торговий цикл"""
+        if not self.initialized:
+            logger.error("❌ Система не ініціалізована")
+            return
+        
+        self.running = True
+        logger.info("🎯 Запуск торгового циклу...")
+        
+        iteration = 0
+        
+        try:
+            while self.running:
+                iteration += 1
+                logger.info(f"\n{'='*60}")
+                logger.info(f"🔄 Ітерація #{iteration} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                logger.info(f"{'='*60}")
+                
+                try:
+                    # 1. Синхронізація балансу
+                    await self._sync_balance()
+                    
+                    # 2. Завантаження даних
+                    logger.info("📊 Завантаження ринкових даних...")
+                    market_data = await self.data_loader.get_multiple_symbols(
+                        symbols=self.symbols,
+                        interval='1h',
+                        days_back=30
+                    )
+                    logger.info(f"✅ Завантажено дані для {len(market_data)} символів")
+                    
+                    # 3. ML прогнози
+                    logger.info("🤖 Генерація прогнозів...")
+                    predictions = await self._generate_predictions(market_data)
+                    
+                    # Відправка прогнозів у Telegram (кожні 5 ітерацій)
+                    if iteration % 5 == 1:
+                        await self._send_predictions_summary(predictions)
+                    
+                    # 4. Торгові сигнали
+                    if self.strategy_integration:
+                        logger.info("📈 Генерація сигналів...")
+                        signals = await self.strategy_integration.generate_signals(
+                            market_data=market_data,
+                            predictions=predictions
+                        )
+                        
+                        if signals:
+                            logger.info(f"📊 Отримано {len(signals)} сигналів")
+                            await self._execute_signals(signals, market_data)
+                        else:
+                            logger.info("ℹ️ Немає сигналів")
+                    
+                    # 5. Перевірка позицій
+                    if self.positions:
+                        await self._check_positions(market_data)
+                    
+                    # 6. Статус
+                    if iteration % 5 == 0:
+                        self._print_trading_status()
+                    
+                    # Завершення якщо --once
+                    if self.config.get('run_once'):
+                        logger.info("🛑 Режим --once: завершення")
+                        break
+                    
+                    # Очікування
+                    interval = self.config.get('trading_interval', 300)
+                    logger.info(f"⏳ Очікування {interval}с...")
+                    await asyncio.sleep(interval)
+                    
+                except Exception as e:
+                    logger.error(f"❌ Помилка в ітерації: {e}", exc_info=True)
+                    await asyncio.sleep(60)
+                    
+        except asyncio.CancelledError:
+            logger.info("🛑 Цикл скасовано")
+        finally:
+            self.running = False
+            logger.info("🔴 Торговий цикл зупинено")
+    
+    async def _generate_predictions(self, market_data: Dict[str, pd.DataFrame]) -> Dict[str, Dict]:
+        """Генерація ML прогнозів"""
+        predictions = {}
+        
+        for symbol, df in market_data.items():
+            if df.empty or len(df) < 60:
+                continue
+            
+            try:
+                current_price = df['close'].iloc[-1]
+                
+                # Якщо є модель
+                if symbol in self.ml_models:
+                    model = self.ml_models[symbol]
+                    
+                    # Підготовка даних
+                    from optimized_indicators import OptimizedIndicatorCalculator
+                    indicator_calc = OptimizedIndicatorCalculator()
+                    indicators_dict = await indicator_calc.calculate_all_indicators_batch(df)
+                    
+                    # Додавання індикаторів
+                    df['rsi'] = indicators_dict.get('RSI', pd.Series(index=df.index, dtype=float))
+                    df['macd'] = indicators_dict.get('MACD', pd.Series(index=df.index, dtype=float))
+                    df['macd_signal'] = indicators_dict.get('MACD_Signal', pd.Series(index=df.index, dtype=float))
+                    df['bb_upper'] = indicators_dict.get('BB_Upper', pd.Series(index=df.index, dtype=float))
+                    df['bb_lower'] = indicators_dict.get('BB_Lower', pd.Series(index=df.index, dtype=float))
+                    df['bb_middle'] = df['close'].rolling(window=20).mean()
+                    df['sma_20'] = df['close'].rolling(window=20).mean()
+                    df['sma_50'] = df['close'].rolling(window=50).mean()
+                    df['ema_12'] = df['close'].ewm(span=12).mean()
+                    df['ema_26'] = df['close'].ewm(span=26).mean()
+                    df['volume_sma'] = df['volume'].rolling(window=20).mean()
+                    df['atr'] = indicators_dict.get('ATR', pd.Series(index=df.index, dtype=float))
+                    df['adx'] = pd.Series(index=df.index, dtype=float).fillna(50)
+                    df['stoch_k'] = indicators_dict.get('Stoch_K', pd.Series(index=df.index, dtype=float))
+                    df['stoch_d'] = indicators_dict.get('Stoch_D', pd.Series(index=df.index, dtype=float))
+                    df['cci'] = indicators_dict.get('CCI', pd.Series(index=df.index, dtype=float))
+                    df['mfi'] = pd.Series(index=df.index, dtype=float).fillna(50)
+                    df['willr'] = indicators_dict.get('Williams_R', pd.Series(index=df.index, dtype=float))
+                    df['roc'] = indicators_dict.get('ROC', pd.Series(index=df.index, dtype=float))
+                    df['obv'] = (df['volume'] * (~df['close'].diff().le(0) * 2 - 1)).cumsum()
+                    
+                    feature_columns = [
+                        'rsi', 'macd', 'macd_signal', 'bb_upper', 'bb_middle', 'bb_lower',
+                        'sma_20', 'sma_50', 'ema_12', 'ema_26', 'volume_sma',
+                        'atr', 'adx', 'stoch_k', 'stoch_d', 'cci', 'mfi',
+                        'willr', 'roc', 'obv'
+                    ]
+                    
+                    df_clean = df.dropna()
+                    
+                    if len(df_clean) >= 60:
+                        X = df_clean[feature_columns].values[-60:]
+                        
+                        # Нормалізація
+                        from sklearn.preprocessing import StandardScaler
+                        scaler = StandardScaler()
+                        X_scaled = scaler.fit_transform(X)
+                        X_seq = X_scaled.reshape(1, 60, len(feature_columns))
+                        
+                        # Прогноз
+                        predicted_scaled = model.predict(X_seq)
+                        predicted_price = current_price * (1 + (predicted_scaled[0] * 0.05))
+                        predicted_change = (predicted_price - current_price) / current_price
+                        
+                        confidence = calculate_signal_confidence(predicted_change, df_clean)
+                        
+                        predictions[symbol] = {
+                            'current_price': current_price,
+                            'predicted_price': predicted_price,
+                            'predicted_change': predicted_change,
+                            'change_percent': predicted_change,  # Додаємо для сумісності зі стратегіями
+                            'confidence': confidence,
+                            'timestamp': datetime.now()
+                        }
+                        
+                        logger.info(f"🤖 {symbol}: ${current_price:.2f} → ${predicted_price:.2f} ({predicted_change:.2%})")
+                        continue
+                
+                # Базовий прогноз
+                price_change = df['close'].pct_change().iloc[-1]
+                predicted_change = price_change * 1.1
+                predicted_price = current_price * (1 + predicted_change)
+                confidence = calculate_signal_confidence(predicted_change, df)
+                
+                predictions[symbol] = {
+                    'current_price': current_price,
+                    'predicted_price': predicted_price,
+                    'predicted_change': predicted_change,
+                    'change_percent': predicted_change,  # Додаємо для сумісності зі стратегіями
+                    'confidence': confidence,
+                    'timestamp': datetime.now()
+                }
+                
+            except Exception as e:
+                logger.error(f"❌ Помилка прогнозу {symbol}: {e}")
+        
+        return predictions
+    
+    async def _send_predictions_summary(self, predictions: Dict[str, Dict]):
+        """Відправка підсумку прогнозів у Telegram"""
+        if not predictions:
+            return
+        
+        msg_lines = ["📊 ML ПРОГНОЗИ:\n"]
+        
+        # Сортуємо за зміною ціни
+        sorted_preds = sorted(
+            predictions.items(),
+            key=lambda x: abs(x[1].get('predicted_change', 0)),
+            reverse=True
+        )
+        
+        for symbol, pred in sorted_preds[:5]:  # Топ-5
+            current = pred.get('current_price', 0)
+            predicted = pred.get('predicted_price', 0)
+            change_pct = pred.get('predicted_change', 0) * 100
+            
+            emoji = "📈" if change_pct > 0 else "📉"
+            msg_lines.append(
+                f"{emoji} {symbol}: ${current:.2f} → ${predicted:.2f} ({change_pct:+.2f}%)"
+            )
+        
+        await telegram_notifier.send_message("\n".join(msg_lines))
+    
+    async def _execute_signals(self, signals: Dict[str, Any], market_data: Dict[str, pd.DataFrame]):
+        """Виконання торгових сигналів"""
+        from strategies.base import TradeAction
+        
+        for symbol, signal in signals.items():
+            try:
+                # Валідація
+                is_valid, reason = self.strategy_integration.validate_signal(signal)
+                if not is_valid:
+                    logger.warning(f"⚠️ {symbol}: сигнал відхилено - {reason}")
+                    continue
+                
+                # Розмір позиції
+                quantity = self.strategy_integration.calculate_position_size(signal)
+                if quantity <= 0:
+                    logger.warning(f"⚠️ {symbol}: некоректний розмір позиції")
+                    continue
+                
+                # Перевірка наявності позиції
+                if signal.action == TradeAction.BUY and symbol in self.positions:
+                    logger.info(f"ℹ️ {symbol}: позиція вже відкрита")
+                    continue
+                if signal.action == TradeAction.SELL and symbol not in self.positions:
+                    logger.info(f"ℹ️ {symbol}: немає позиції для закриття")
+                    continue
+                
+                logger.info(f"📈 {symbol}: {signal.action.value} qty={quantity:.6f} price={signal.entry_price:.2f}")
+                
+                # Telegram
+                await telegram_notifier.send_trade_signal(
+                    symbol=symbol,
+                    action=signal.action.value,
+                    quantity=quantity,
+                    price=signal.entry_price,
+                    confidence=signal.confidence
+                )
+                
+                # Виконання
+                if signal.action == TradeAction.BUY:
+                    await self._execute_buy(symbol, signal, quantity)
+                elif signal.action == TradeAction.SELL:
+                    await self._execute_sell(symbol, signal, quantity)
+                    
+            except Exception as e:
+                logger.error(f"❌ Помилка виконання {symbol}: {e}", exc_info=True)
+    
+    async def _execute_buy(self, symbol: str, signal: Any, quantity: float):
+        """Виконання BUY ордера"""
+        try:
+            # Округлення
+            quantity = self._round_quantity(symbol, quantity)
+            
+            # Розміщення ордера
+            order = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.binance_client.futures_create_order(
+                    symbol=symbol,
+                    side='BUY',
+                    type='MARKET',
+                    quantity=quantity
+                )
+            )
+            
+            order_id = order['orderId']
+            logger.info(f"� Ордер {symbol} створено (ID: {order_id})")
+            
+            # Чекаємо виконання ордера (до 5 секунд)
+            for attempt in range(10):
+                await asyncio.sleep(0.5)
+                order_status = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: self.binance_client.futures_get_order(symbol=symbol, orderId=order_id)
+                )
+                
+                if order_status['status'] == 'FILLED':
+                    executed_price = float(order_status.get('avgPrice', 0))
+                    executed_qty = float(order_status.get('executedQty', 0))
+                    
+                    if executed_price > 0 and executed_qty > 0:
+                        logger.info(f"✅ BUY {symbol}: {executed_qty:.6f} @ ${executed_price:.2f}")
+                        break
+                    else:
+                        logger.warning(f"⚠️ Ордер виконаний, але дані некоректні: price={executed_price}, qty={executed_qty}")
+                        # Використовуємо поточну ціну
+                        executed_price = signal.entry_price
+                        executed_qty = quantity
+                        break
+            else:
+                # Таймаут - використовуємо дані з ордера
+                logger.warning(f"⚠️ Таймаут очікування виконання {symbol}, використовую origQty")
+                executed_price = signal.entry_price
+                executed_qty = quantity
+            
+            logger.info(f"✅ BUY {symbol}: {executed_qty:.6f} @ ${executed_price:.2f}")
+            
+            # Збереження позиції
+            self.positions[symbol] = {
+                'side': 'BUY',
+                'entry_price': executed_price,
+                'quantity': executed_qty,
+                'entry_time': datetime.now(),
+                'stop_loss': signal.stop_loss,
+                'take_profit': signal.take_profit,
+                'order_id': order_id
+            }
+            
+            # Stop Loss
+            if signal.stop_loss:
+                try:
+                    sl_price = await self._round_price(symbol, signal.stop_loss)
+                    sl_order = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: self.binance_client.futures_create_order(
+                            symbol=symbol,
+                            side='SELL',
+                            type='STOP_MARKET',
+                            quantity=executed_qty,
+                            stopPrice=str(sl_price)
+                        )
+                    )
+                    self.positions[symbol]['sl_order_id'] = sl_order['orderId']
+                    logger.info(f"🛑 SL {symbol}: ${sl_price:.2f}")
+                except Exception as e:
+                    logger.warning(f"⚠️ SL помилка: {e}")
+            
+            # Take Profit
+            if signal.take_profit:
+                try:
+                    tp_price = await self._round_price(symbol, signal.take_profit)
+                    tp_order = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: self.binance_client.futures_create_order(
+                            symbol=symbol,
+                            side='SELL',
+                            type='TAKE_PROFIT_MARKET',
+                            quantity=executed_qty,
+                            stopPrice=str(tp_price)
+                        )
+                    )
+                    self.positions[symbol]['tp_order_id'] = tp_order['orderId']
+                    logger.info(f"🎯 TP {symbol}: ${tp_price:.2f}")
+                except Exception as e:
+                    logger.warning(f"⚠️ TP помилка: {e}")
+            
+            # Збереження в БД
+            from optimized_db import db_manager, save_position
+            position_data = {
+                'symbol': symbol,
+                'side': 'LONG',
+                'entry_price': executed_price,
+                'quantity': executed_qty,
+                'stop_loss': signal.stop_loss,
+                'take_profit': signal.take_profit,
+                'strategy': signal.strategy_name or 'unknown',
+                'status': 'open',
+                'metadata': {
+                    'order_id': order_id,
+                    'confidence': signal.confidence
+                }
+            }
+            position_id = await save_position(db_manager, position_data)
+            if position_id:
+                self.positions[symbol]['position_id'] = position_id
+                logger.info(f"💾 Позиція збережена (ID: {position_id})")
+            
+            # Telegram
+            cost = executed_price * executed_qty
+            await telegram_notifier.send_trade_execution(
+                symbol=symbol,
+                action="BUY",
+                quantity=executed_qty,
+                price=executed_price,
+                cost=cost,
+                balance=self.portfolio_balance,
+                is_paper_trading=False
+            )
+            
+            # Оновлення балансу
+            await self._sync_balance()
+            
+        except Exception as e:
+            logger.error(f"❌ Помилка BUY {symbol}: {e}", exc_info=True)
+    
+    async def _execute_sell(self, symbol: str, signal: Any, quantity: float):
+        """Виконання SELL ордера"""
+        if symbol not in self.positions:
+            logger.warning(f"⚠️ {symbol}: немає позиції")
+            return
+        
+        try:
+            position = self.positions[symbol]
+            
+            # Скасування SL/TP
+            for order_type in ['sl_order_id', 'tp_order_id']:
+                if order_id := position.get(order_type):
+                    try:
+                        await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: self.binance_client.futures_cancel_order(symbol=symbol, orderId=order_id)
+                        )
+                    except:
+                        pass
+            
+            # Округлення
+            quantity = min(quantity, position['quantity'])
+            quantity = self._round_quantity(symbol, quantity)
+            
+            # Розміщення ордера
+            order = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.binance_client.futures_create_order(
+                    symbol=symbol,
+                    side='SELL',
+                    type='MARKET',
+                    quantity=quantity
+                )
+            )
+            
+            executed_price = float(order.get('avgPrice', signal.entry_price))
+            executed_qty = float(order.get('executedQty', quantity))
+            
+            # PnL
+            pnl = (executed_price - position['entry_price']) * executed_qty
+            revenue = executed_price * executed_qty
+            
+            logger.info(f"✅ SELL {symbol}: {executed_qty:.6f} @ ${executed_price:.2f} (PnL: ${pnl:.2f})")
+            
+            # Оновлення БД
+            position_id = position.get('position_id')
+            if position_id:
+                from optimized_db import db_manager
+                async with db_manager.async_session_factory() as session:
+                    from sqlalchemy import text
+                    await session.execute(text('''
+                        UPDATE positions 
+                        SET status = 'closed', 
+                            exit_price = :exit_price,
+                            exit_time = NOW(),
+                            pnl = :pnl
+                        WHERE id = :position_id
+                    '''), {
+                        'exit_price': executed_price,
+                        'pnl': pnl,
+                        'position_id': position_id
+                    })
+                    await session.commit()
+                logger.info(f"💾 Позиція закрита в БД (ID: {position_id})")
+            
+            # Видалення з пам'яті
+            del self.positions[symbol]
+            
+            # Запис в strategy integration
+            if self.strategy_integration:
+                self.strategy_integration.record_trade(
+                    symbol=symbol,
+                    pnl=pnl,
+                    strategy_name=position.get('strategy_name')
+                )
+            
+            # Telegram
+            await telegram_notifier.send_trade_execution(
+                symbol=symbol,
+                action="SELL",
+                quantity=executed_qty,
+                price=executed_price,
+                cost=revenue,
+                balance=self.portfolio_balance,
+                is_paper_trading=False
+            )
+            
+            # Оновлення балансу
+            await self._sync_balance()
+            
+        except Exception as e:
+            logger.error(f"❌ Помилка SELL {symbol}: {e}", exc_info=True)
+    
+    async def _check_positions(self, market_data: Dict[str, pd.DataFrame]):
+        """Перевірка відкритих позицій"""
+        if not self.strategy_integration:
+            return
+        
+        current_prices = {
+            symbol: df['close'].iloc[-1]
+            for symbol, df in market_data.items()
+            if not df.empty
         }
+        
+        close_decisions = await self.strategy_integration.check_close_positions(
+            current_prices=current_prices,
+            market_data=market_data
+        )
+        
+        for symbol, should_close in close_decisions.items():
+            if should_close and symbol in self.positions:
+                try:
+                    position = self.positions[symbol]
+                    current_price = current_prices.get(symbol)
+                    
+                    if current_price:
+                        # Створюємо фейковий сигнал для закриття
+                        from strategies.base import TradeAction, TradingSignal
+                        close_signal = TradingSignal(
+                            symbol=symbol,
+                            action=TradeAction.SELL,
+                            entry_price=current_price,
+                            quantity=position['quantity'],
+                            confidence=0.8,
+                            strategy_name=position.get('strategy_name')
+                        )
+                        
+                        await self._execute_sell(symbol, close_signal, position['quantity'])
+                        
+                except Exception as e:
+                    logger.error(f"❌ Помилка закриття {symbol}: {e}")
     
-    async def cleanup(self):
-        """Очищення ресурсів"""
-        logger.info("🧹 Очищення ресурсів...")
-        await shutdown_async_system()
-        logger.info("✅ Очищення завершено")
+    def _round_quantity(self, symbol: str, quantity: float) -> float:
+        """Округлення кількості згідно з LOT_SIZE"""
+        try:
+            info = self.binance_client.futures_exchange_info()
+            symbol_info = next((s for s in info['symbols'] if s['symbol'] == symbol), None)
+            if symbol_info:
+                # Шукаємо LOT_SIZE filter
+                lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
+                if lot_size_filter:
+                    step_size = float(lot_size_filter['stepSize'])
+                    precision = len(str(step_size).rstrip('0').split('.')[-1])
+                    rounded = round(quantity / step_size) * step_size
+                    return round(rounded, precision)
+            return quantity
+        except Exception as e:
+            logger.warning(f"⚠️ Помилка округлення {symbol}: {e}")
+            return quantity
+    
+    async def _round_price(self, symbol: str, price: float) -> float:
+        """Округлення ціни згідно з PRICE_FILTER"""
+        try:
+            info = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.binance_client.futures_exchange_info()
+            )
+            symbol_info = next((s for s in info['symbols'] if s['symbol'] == symbol), None)
+            if symbol_info:
+                # Шукаємо PRICE_FILTER
+                price_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'PRICE_FILTER'), None)
+                if price_filter:
+                    tick_size = float(price_filter['tickSize'])
+                    precision = len(str(tick_size).rstrip('0').split('.')[-1])
+                    rounded = round(price / tick_size) * tick_size
+                    return round(rounded, precision)
+            return price
+        except Exception as e:
+            logger.warning(f"⚠️ Помилка округлення ціни {symbol}: {e}")
+            return price
+    
+    def _print_trading_status(self):
+        """Виведення торгового статусу"""
+        logger.info("\n" + "=" * 60)
+        logger.info("📊 TRADING STATUS")
+        logger.info("=" * 60)
+        logger.info(f"💰 Баланс: ${self.portfolio_balance:.2f}")
+        logger.info(f"📈 Позиції: {len(self.positions)}")
+        
+        if self.positions:
+            for symbol, pos in self.positions.items():
+                logger.info(f"  • {symbol}: {pos['quantity']:.6f} @ ${pos['entry_price']:.2f}")
+        
+        if self.strategy_integration:
+            perf = self.strategy_integration.get_performance_summary()
+            logger.info(f"📊 Угод: {perf.get('total_trades', 0)}")
+            logger.info(f"✅ Win rate: {perf.get('win_rate', 0):.1%}")
+            logger.info(f"💵 PnL: ${perf.get('total_pnl', 0):.2f}")
+        
+        logger.info("=" * 60 + "\n")
+    
+    async def shutdown(self):
+        """Завершення роботи"""
+        if self.shutdown_requested:
+            return
+        self.shutdown_requested = True
+        
+        logger.info("🔄 Завершення роботи...")
+        
+        self.running = False
+        
+        # Закриття компонентів
+        if self.data_loader:
+            try:
+                await self.data_loader.close()
+            except:
+                pass
+        
+        if self.strategy_integration:
+            try:
+                self.strategy_integration.shutdown()
+            except:
+                pass
+        
+        try:
+            await shutdown_async_system()
+        except:
+            pass
+        
+        logger.info("✅ Система завершена")
 
-# Глобальний екземпляр системи
-crypto_system = OptimizedCryptoMLSystem()
+
+def setup_signal_handlers(system: SimpleTradingSystem, loop):
+    """Налаштування обробників сигналів"""
+    def handle_shutdown(signum, frame):
+        logger.info(f"📡 Отримано сигнал {signal.Signals(signum).name}")
+        loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(system.shutdown())
+        )
+    
+    signal.signal(signal.SIGINT, handle_shutdown)
+    signal.signal(signal.SIGTERM, handle_shutdown)
+
 
 async def main():
-    """Головна асинхронна функція"""
-    parser = argparse.ArgumentParser(description="Оптимізована система прогнозування криптовалют")
-    parser.add_argument("--symbol", type=str, default=SYMBOL, help="Торгова пара")
-    parser.add_argument("--interval", type=str, default=INTERVAL, help="Інтервал часу")
-    parser.add_argument("--days_back", type=int, default=DAYS_BACK, help="Днів історії")
-    parser.add_argument("--look_back", type=int, default=LOOK_BACK, help="Розмір вікна з optimized_config")
-    parser.add_argument("--steps", type=int, default=STEPS, help="Кроків прогнозу")
-    parser.add_argument("--force_retrain", action="store_true", help="Примусове перетренування")
-    parser.add_argument("--use_cv", action="store_true", help="Використати TimeSeriesSplit cross-validation")
-    parser.add_argument("--batch", nargs="+", help="Пакетна обробка символів")
-    parser.add_argument("--symbols", nargs="+", default=[SYMBOL], help="Список символів для обробки")
-    parser.add_argument("--model_type", type=str, default="advanced_lstm", choices=["advanced_lstm", "transformer", "cnn_lstm"], help="Тип моделі")
-    parser.add_argument("--status", action="store_true", help="Показати статус системи")
+    """Головна функція"""
+    parser = argparse.ArgumentParser(description="Торгова система (Binance only)")
+    parser.add_argument('--symbols', nargs='+',
+                       default=['BTCUSDT', 'ETHUSDT', 'ADAUSDT', 'SOLUSDT',
+                               'AVAXUSDT', 'DOTUSDT', 'LINKUSDT'],
+                       help='Список символів')
+    parser.add_argument('--interval', type=int, default=300, help='Інтервал торгівлі (сек)')
+    parser.add_argument('--once', action='store_true', help='Одна ітерація')
+    parser.add_argument('--skip-data-sync', action='store_true', help='Пропустити синхронізацію даних')
+    parser.add_argument('--enable-strategies', action='store_true', default=True, help='Увімкнути стратегії')
+    parser.add_argument('--enable-scalping', action='store_true', help='Скальпінг')
+    parser.add_argument('--enable-day-trading', action='store_true', default=True, help='Денна торгівля')
+    parser.add_argument('--enable-swing-trading', action='store_true', default=True, help='Свінг-трейдинг')
     
     args = parser.parse_args()
     
-    try:
-        # Ініціалізація системи
-        await crypto_system.initialize()
-
-        # Запуск системи моніторингу
-        monitoring_task = asyncio.create_task(monitoring_system.start_monitoring(interval_seconds=60))
-        logger.info("📊 Система моніторингу запущена")
-
-        # Автоматичне завантаження історичних даних з Binance для всіх символів
-        logger.info("⏳ Завантаження історичних даних з Binance...")
-        for symbol in args.symbols:
-            await save_ohlcv_to_db(db_manager, symbol, args.interval, days_back=args.days_back)
-        logger.info(f"✅ Дані з Binance завантажено у historical_data для {len(args.symbols)} символів")
-
-        if args.status:
-            # Показати статус
-            status = await crypto_system.get_system_status()
-            logger.info(f"📊 Статус системи: {status}")
-            return
-        
-        if args.batch:
-            # Пакетна обробка
-            results = await crypto_system.batch_process_symbols(
-                symbols=args.batch,
-                interval=args.interval,
-                days_back=args.days_back,
-                look_back=args.look_back,
-                steps=args.steps,
-                force_retrain=args.force_retrain,
-                use_cv=args.use_cv,
-                model_type=args.model_type
-            )
-            
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    logger.error(f"❌ Помилка обробки {args.batch[i]}: {result}")
-                elif result:
-                    logger.info(f"✅ {args.batch[i]}: {result['predictions']}")
-        else:
-            # Обробка всіх символів з --symbols
-            all_results = []
-            for symbol in args.symbols:
-                logger.info(f"📊 Обробка символу: {symbol}")
-                result = await crypto_system.process_symbol_optimized(
-                    symbol=symbol,
-                    interval=args.interval,
-                    days_back=args.days_back,
-                    look_back=args.look_back,
-                    steps=args.steps,
-                    force_retrain=args.force_retrain,
-                    use_cv=args.use_cv,
-                    model_type=args.model_type
-                )
-                
-                if result:
-                    all_results.append(result)
-                    predictions = result['predictions']
-                    if predictions:
-                        last_price = result.get('last_price', 0)
-                        first_pred = predictions[0]
-                        if last_price > 0:
-                            price_error_pct = ((first_pred - last_price) / last_price) * 100
-                            error_sign = "+" if price_error_pct >= 0 else ""
-                            logger.info(f"✅ {symbol}: Прогноз {first_pred:.2f} ({error_sign}{price_error_pct:.2f}%) від {last_price:.2f}")
-                        else:
-                            logger.info(f"✅ {symbol}: Прогнози: {[f'{p:.2f}' for p in predictions]}")
-            
-            # Підсумок для всіх символів
-            if all_results:
-                logger.info("🎯 Загальні результати прогнозування:")
-                for result in all_results:
-                    symbol = result['symbol']
-                    last_price = result['last_price']
-                    predictions = result['predictions']
-                    if predictions:
-                        # Розраховуємо відсоткову похибку для першого прогнозу
-                        first_pred = predictions[0]
-                        price_error_pct = ((first_pred - last_price) / last_price) * 100
-                        error_sign = "+" if price_error_pct >= 0 else ""
-                        logger.info(f"   {symbol}: Остання ціна {last_price:.2f}, Прогноз {first_pred:.2f} ({error_sign}{price_error_pct:.2f}%)")
+    config = {
+        'symbols': args.symbols,
+        'trading_interval': args.interval,
+        'run_once': args.once,
+        'skip_data_sync': args.skip_data_sync,
+        'enable_strategies': args.enable_strategies,
+        'enable_scalping': args.enable_scalping,
+        'enable_day_trading': args.enable_day_trading,
+        'enable_swing_trading': args.enable_swing_trading
+    }
     
+    system = SimpleTradingSystem(config)
+    loop = asyncio.get_running_loop()
+    setup_signal_handlers(system, loop)
+    
+    try:
+        if not await system.initialize():
+            logger.error("❌ Помилка ініціалізації")
+            return 1
+        
+        logger.info("🚀 Запуск системи...")
+        await system.run()
+        
     except KeyboardInterrupt:
-        logger.info("⏸️ Отримано сигнал переривання")
+        logger.info("🛑 Ctrl+C")
     except Exception as e:
         logger.error(f"❌ Критична помилка: {e}", exc_info=True)
+        return 1
     finally:
-        # Зупинка моніторингу
-        monitoring_system.stop_monitoring()
-        if 'monitoring_task' in locals():
-            monitoring_task.cancel()
-            try:
-                await monitoring_task
-            except asyncio.CancelledError:
-                pass
-        logger.info("📊 Моніторинг зупинено")
-        
-        await crypto_system.cleanup()
+        await system.shutdown()
+    
+    return 0
+
 
 if __name__ == "__main__":
-    # Імпорт numpy для використання в функції
-    import numpy as np
-    from sklearn.preprocessing import StandardScaler
+    try:
+        import uvloop
+        uvloop.install()
+        logger.info("✅ uvloop")
+    except ImportError:
+        pass
     
-    # Запуск головної функції
-    asyncio.run(main())
+    exit_code = asyncio.run(main())
+    sys.exit(exit_code)

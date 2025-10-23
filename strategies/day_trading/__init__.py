@@ -43,7 +43,7 @@ class DayTradingStrategy(TradingStrategy):
         self.winning_trades = 0
         self.total_pnl = 0.0
 
-    def analyze_market(self, market_data: Dict[str, pd.DataFrame],
+    async def analyze_market(self, market_data: Dict[str, pd.DataFrame],
                       predictions: Dict[str, Dict]) -> Dict[str, TradeSignal]:
         """
         Аналіз ринку для денної торгівлі
@@ -269,3 +269,42 @@ class DayTradingStrategy(TradingStrategy):
             'trading_hours': f"{self.trading_start}-{self.trading_end}"
         })
         return stats
+    
+    async def should_close_position(
+        self,
+        position: Position,
+        current_price: float,
+        market_data: pd.DataFrame
+    ) -> bool:
+        """
+        Перевірка чи потрібно закривати позицію
+        
+        Критерії закриття:
+        - Досягнуто stop-loss або take-profit
+        - Перевищено максимальний час тримання позиції
+        - Технічний індикатор показує розворот тренду
+        """
+        # Перевірка stop-loss і take-profit
+        if position.stop_loss and current_price <= position.stop_loss:
+            return True
+        if position.take_profit and current_price >= position.take_profit:
+            return True
+        
+        # Перевірка часу тримання
+        hold_time = (datetime.now() - position.entry_time).total_seconds() / 60
+        if hold_time > self.max_hold_time:
+            return True
+        
+        # Перевірка технічних індикаторів (якщо є достатньо даних)
+        if len(market_data) >= 20:
+            try:
+                # RSI розворот
+                rsi = self._calculate_rsi(market_data['close'], period=14)
+                if position.side == 'BUY' and rsi.iloc[-1] > self.rsi_overbought:
+                    return True
+                elif position.side == 'SELL' and rsi.iloc[-1] < self.rsi_oversold:
+                    return True
+            except Exception:
+                pass
+        
+        return False
