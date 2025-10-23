@@ -1,6 +1,3 @@
-# Топ-35 відібраних фічей для тренування
-# Створено автоматично feature_selection.py
-
 SELECTED_FEATURES = [
     'volume',
     'returns',
@@ -38,6 +35,3 @@ SELECTED_FEATURES = [
     'dist_from_mean_5',
     'Stoch_K',
 ]
-
-# Всього: 35 фічей
-# Дата аналізу: 2025-10-19 18:59:41.712426
