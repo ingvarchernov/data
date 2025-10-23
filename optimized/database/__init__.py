@@ -1,14 +1,28 @@
 """
 Optimized Database Package
 
-Модульна структура для роботи з базою даних:
-- connection: Database connection management (sync + async)
+Modules:
+- connection: Connection pooling  
 - cache: Redis + memory caching
-- queries: Common database queries (будуть додані)
-
-Backward compatibility:
-- Основні компоненти для зворотної сумісності з optimized_db.py
 """
+
+from optimized.database.connection import (
+    DatabaseConnection,
+    db_manager,
+    save_trading_signal,
+    save_position,
+    save_trade,
+)
+from optimized.database.cache import CacheManager
+
+__all__ = [
+    'DatabaseConnection',
+    'CacheManager',
+    'db_manager',
+    'save_trading_signal',
+    'save_position',
+    'save_trade',
+]
 
 from .connection import DatabaseConnection
 from .cache import CacheManager

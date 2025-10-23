@@ -153,6 +153,129 @@ class DatabaseConnection:
         logger.info("✅ Database connections closed")
 
 
+# ============================================================================
+# ГЛОБАЛЬНИЙ МЕНЕДЖЕР (для зворотної сумісності)
+# ============================================================================
+
+db_manager = DatabaseConnection()
+
+
+# ============================================================================
+# ФУНКЦІЇ ДЛЯ ЗВОРОТНОЇ СУМІСНОСТІ З live_trading.py
+# ============================================================================
+
+async def save_trading_signal(db, signal_data: dict) -> int:
+    """
+    Збереження торгового сигналу в БД
+    
+    Args:
+        db: DatabaseConnection instance
+        signal_data: Dict з даними сигналу
+        
+    Returns:
+        ID збереженого сигналу
+    """
+    try:
+        async with db.async_session_factory() as session:
+            result = await session.execute(
+                text("""
+                    INSERT INTO trading_signals 
+                    (symbol, action, confidence, entry_price, stop_loss, take_profit, 
+                     quantity, strategy, prediction_source, status, notes, created_at)
+                    VALUES 
+                    (:symbol, :action, :confidence, :entry_price, :stop_loss, :take_profit,
+                     :quantity, :strategy, :prediction_source, :status, :notes, NOW())
+                    RETURNING id
+                """),
+                signal_data
+            )
+            signal_id = result.scalar_one()
+            await session.commit()
+            logger.info(f"✅ Signal saved: {signal_data.get('symbol')} {signal_data.get('action')}")
+            return signal_id
+    except Exception as e:
+        logger.error(f"❌ Error saving signal: {e}")
+        return None
+
+
+async def save_position(db, position_data: dict) -> int:
+    """
+    Збереження позиції в БД
+    
+    Args:
+        db: DatabaseConnection instance
+        position_data: Dict з даними позиції
+        
+    Returns:
+        ID збереженої позиції
+    """
+    try:
+        async with db.async_session_factory() as session:
+            result = await session.execute(
+                text("""
+                    INSERT INTO positions 
+                    (symbol, side, entry_price, quantity, stop_loss, take_profit, 
+                     status, signal_id, strategy, entry_time, metadata)
+                    VALUES 
+                    (:symbol, :side, :entry_price, :quantity, :stop_loss, :take_profit,
+                     :status, :signal_id, :strategy, :entry_time, :metadata)
+                    RETURNING id
+                """),
+                position_data
+            )
+            position_id = result.scalar_one()
+            await session.commit()
+            logger.info(f"✅ Position saved: {position_data.get('symbol')} {position_data.get('side')}")
+            return position_id
+    except Exception as e:
+        logger.error(f"❌ Error saving position: {e}")
+        return None
+
+
+async def save_trade(db, trade_data: dict) -> int:
+    """
+    Збереження завершеної угоди в БД
+    
+    Args:
+        db: DatabaseConnection instance
+        trade_data: Dict з даними угоди
+        
+    Returns:
+        ID збереженої угоди
+    """
+    try:
+        async with db.async_session_factory() as session:
+            result = await session.execute(
+                text("""
+                    INSERT INTO trades 
+                    (symbol, side, entry_price, exit_price, quantity, entry_time, exit_time,
+                     pnl, pnl_percentage, strategy, exit_reason, position_id, signal_id, fees, metadata)
+                    VALUES 
+                    (:symbol, :side, :entry_price, :exit_price, :quantity, :entry_time, :exit_time,
+                     :pnl, :pnl_percentage, :strategy, :exit_reason, :position_id, :signal_id, :fees, :metadata)
+                    RETURNING id
+                """),
+                trade_data
+            )
+            trade_id = result.scalar_one()
+            await session.commit()
+            
+            pnl = trade_data.get('pnl', 0)
+            pnl_pct = trade_data.get('pnl_percentage', 0)
+            logger.info(
+                f"✅ Trade saved: {trade_data.get('symbol')} {trade_data.get('side')} "
+                f"P&L: ${pnl:.2f} ({pnl_pct:.2f}%)"
+            )
+            return trade_id
+    except Exception as e:
+        logger.error(f"❌ Error saving trade: {e}")
+        return None
+
+
 __all__ = [
     'DatabaseConnection',
+    'db_manager',
+    'save_trading_signal',
+    'save_position',
+    'save_trade',
 ]

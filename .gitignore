@@ -23,7 +23,10 @@ logs/
 nohup.out
 
 # Models & Checkpoints
-models/
+models/*
+!models/.gitkeep
+# Але дозволяємо training/models/ - там код, не моделі
+!training/
 *.h5
 *.keras
 *.pkl
@@ -136,7 +139,7 @@ db_utils.py
 base_main.py
 .gitignore
 logs
-models
+# models - ВИДАЛЕНО, бо ігнорувало training/models/
 .sh
 .txt
 tests/metrics_analysis.py

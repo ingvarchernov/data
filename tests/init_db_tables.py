@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Якщо змінних немає - просто використаємо db_manager який візьме з .env автоматично
-from optimized_db import db_manager
+from optimized.database import db_manager
 
 # Читаємо SQL схему
 with open('db.sql', 'r', encoding='utf-8') as f:

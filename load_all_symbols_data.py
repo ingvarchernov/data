@@ -9,7 +9,7 @@ from typing import List, Tuple
 from dotenv import load_dotenv
 
 from intelligent_sys import UnifiedBinanceLoader
-from optimized_db import OptimizedDatabaseManager
+from optimized.database import DatabaseConnection
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,7 +66,7 @@ def parse_args() -> argparse.Namespace:
 
 async def sync_symbol(
     loader: UnifiedBinanceLoader,
-    db_manager: OptimizedDatabaseManager,
+    db_manager: DatabaseConnection,
     symbol: str,
     interval: str,
     days_back: int,
@@ -105,7 +105,7 @@ async def run_sync(args: argparse.Namespace) -> None:
         args.use_public_data
     )
 
-    db_manager = OptimizedDatabaseManager()
+    db_manager = DatabaseConnection()
     await db_manager.initialize()
 
     loader = UnifiedBinanceLoader(
