@@ -5,12 +5,16 @@
 """
 
 import os
+import sys
 import logging
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras import layers, Model
 from typing import Tuple, Dict
+
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from training import BaseModelTrainer, FeatureEngineer
 from selected_features import SELECTED_FEATURES
@@ -65,14 +69,22 @@ class OptimizedTrainer(BaseModelTrainer):
     
     async def prepare_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Підготовка фічей:
-        1. Розрахунок всіх індикаторів через FeatureEngineer
-        2. Відбір топ-35 фічей з SELECTED_FEATURES
-        """
-        logger.info("🔧 Розрахунок індикаторів...")
+        Підготовка features з топ-35 features
         
-        # Розрахунок всіх індикаторів
-        df = self.feature_engineer.calculate_all(df)
+        Args:
+            df: DataFrame з OHLCV даними
+            
+        Returns:
+            DataFrame з розрахованими індикаторами
+        """
+        # Розрахунок всіх індикаторів з правильними періодами
+        df = self.feature_engineer.calculate_all(
+            df,
+            sma_periods=[10, 20, 50, 200],  # Include sma_10
+            ema_periods=[12, 20, 26, 50],
+            rsi_periods=[7, 14, 28],
+            atr_periods=[7, 14, 28]
+        )
         
         # Базові price features
         df['returns'] = df['close'].pct_change()

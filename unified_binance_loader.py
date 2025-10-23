@@ -151,7 +151,8 @@ class UnifiedBinanceLoader:
                     'options': {'defaultType': 'spot'}
                 }
                 
-                if self.testnet:
+                # Testnet URL тільки для authenticated запитів
+                if self.testnet and not self.use_public_data:
                     config['urls'] = {'api': 'https://testnet.binance.vision'}
                 
                 if not self.use_public_data:

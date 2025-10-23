@@ -79,7 +79,11 @@ class DataLoader:
         logger.info(f"📊 Завантаження з Binance: {symbol} {interval}, {days} днів")
         
         if self.loader is None:
-            self.loader = UnifiedBinanceLoader(use_public_data=True)
+            # Використовуємо production API (testnet=False) для публічних даних
+            self.loader = UnifiedBinanceLoader(
+                testnet=False,  # Production API
+                use_public_data=True  # Публічне API без автентифікації
+            )
         
         df = await self.loader.get_historical_data(
             symbol=symbol,

@@ -5,12 +5,16 @@ Advanced trainer з Rust індикаторами
 """
 
 import os
+import sys
 import logging
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras import layers, Model
 from typing import Tuple, Dict
+
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from training import BaseModelTrainer, FeatureEngineer
 from gpu_config import configure_gpu
