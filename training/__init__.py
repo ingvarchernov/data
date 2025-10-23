@@ -12,13 +12,25 @@ Training Module - Модуль для тренування моделей
 from .base_trainer import BaseModelTrainer
 from .feature_engineering import FeatureEngineer
 from .data_loader import DataLoader
-from .utils import create_sequences, normalize_data, split_data
+from .utils import (
+    create_sequences,
+    normalize_data,
+    split_data,
+    calculate_class_weights,
+    create_classification_targets,
+    temporal_split
+)
 
 __all__ = [
+    # Classes
     'BaseModelTrainer',
     'FeatureEngineer',
     'DataLoader',
+    # Functions
     'create_sequences',
     'normalize_data',
     'split_data',
+    'calculate_class_weights',
+    'create_classification_targets',
+    'temporal_split',
 ]
