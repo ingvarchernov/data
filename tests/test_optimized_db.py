@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 async def test_db_manager():
     """Тестування OptimizedDatabaseManager"""
-    from optimized_db import OptimizedDatabaseManager
+    from optimized.database import DatabaseConnection as OptimizedDatabaseManager
     
     db = OptimizedDatabaseManager()
     
@@ -64,7 +64,7 @@ async def test_db_manager():
         logger.info("5️⃣ ТЕСТ ТОРГОВИХ СИГНАЛІВ")
         logger.info("=" * 60)
         
-        from optimized_db import save_trading_signal
+        # Use db.save_signal instead of deprecated save_trading_signal
         
         signal_data = {
             'symbol': 'BTCUSDT',
@@ -78,7 +78,7 @@ async def test_db_manager():
             'notes': 'Тестовий сигнал'
         }
         
-        signal_id = await save_trading_signal(db, signal_data)
+        signal_id = await db.save_signal(signal_data)
         logger.info(f"✅ Створено тестовий сигнал ID: {signal_id}")
         
         # 6. Тест інвалідації кешу

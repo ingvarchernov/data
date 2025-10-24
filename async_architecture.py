@@ -647,7 +647,8 @@ async def shutdown_async_system():
         await ml_pipeline.stop()
         
         # ✅ ВИПРАВЛЕННЯ: Lazy import для уникнення циклічної залежності
-        from optimized_db import db_manager
+        from optimized.database import DatabaseConnection
+        db_manager = DatabaseConnection()
         await db_manager.close()
         
         logger.info("✅ Асинхронна система завершена")

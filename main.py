@@ -177,7 +177,8 @@ class SimpleTradingSystem:
     
     async def _sync_market_data(self):
         """Синхронізація ринкових даних"""
-        from optimized_db import db_manager
+        from optimized.database import DatabaseConnection
+        db_manager = DatabaseConnection()
         
         logger.info("📥 Синхронізація ринкових даних...")
         for symbol in self.symbols:
@@ -192,17 +193,16 @@ class SimpleTradingSystem:
     async def _load_models(self):
         """Завантаження ML моделей"""
         logger.info("🤖 Завантаження ML моделей...")
-        from optimized_model import OptimizedPricePredictionModel
+        from training.models.optimized_trainer import OptimizedTrainer
         
         for symbol in self.symbols:
             model_path = f'models/{symbol}_best_model.h5'
             if os.path.exists(model_path):
                 try:
-                    model = OptimizedPricePredictionModel(
-                        input_shape=(60, 20),
-                        model_type='advanced_lstm'
-                    )
-                    model.load_model(model_path)
+                    # OptimizedTrainer is used for training, not loading
+                    # For loading use tf.keras.models.load_model directly
+                    import tensorflow as tf
+                    model = tf.keras.models.load_model(model_path)
                     self.ml_models[symbol] = model
                     logger.info(f"✅ {symbol}: модель завантажена")
                 except Exception as e:
@@ -320,7 +320,7 @@ class SimpleTradingSystem:
                     model = self.ml_models[symbol]
                     
                     # Підготовка даних
-                    from optimized_indicators import OptimizedIndicatorCalculator
+                    from optimized.indicators import OptimizedIndicatorCalculator
                     indicator_calc = OptimizedIndicatorCalculator()
                     indicators_dict = await indicator_calc.calculate_all_indicators_batch(df)
                     
@@ -574,7 +574,8 @@ class SimpleTradingSystem:
                     logger.warning(f"⚠️ TP помилка: {e}")
             
             # Збереження в БД
-            from optimized_db import db_manager, save_position
+            from optimized.database import DatabaseConnection
+            db_manager = DatabaseConnection()
             position_data = {
                 'symbol': symbol,
                 'side': 'LONG',
@@ -589,7 +590,7 @@ class SimpleTradingSystem:
                     'confidence': signal.confidence
                 }
             }
-            position_id = await save_position(db_manager, position_data)
+            position_id = await db_manager.save_position(position_data)
             if position_id:
                 self.positions[symbol]['position_id'] = position_id
                 logger.info(f"💾 Позиція збережена (ID: {position_id})")
@@ -659,7 +660,8 @@ class SimpleTradingSystem:
             # Оновлення БД
             position_id = position.get('position_id')
             if position_id:
-                from optimized_db import db_manager
+                from optimized.database import DatabaseConnection
+                db_manager = DatabaseConnection()
                 async with db_manager.async_session_factory() as session:
                     from sqlalchemy import text
                     await session.execute(text('''
