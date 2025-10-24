@@ -127,8 +127,8 @@ def split_data(
 
 def calculate_class_weights(
     y: np.ndarray,
-    clip_min: float = 0.5,
-    clip_max: float = 3.0
+    clip_min: float = 0.3,   # Знижено з 0.5
+    clip_max: float = 8.0    # Підвищено з 3.0
 ) -> dict:
     """
     Розрахунок class weights для дисбалансу класів

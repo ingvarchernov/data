@@ -1,44 +1,16 @@
-use std::time::Instant;
+// Дозволяємо невикористані функції для бібліотеки
+#![allow(dead_code)]
 
 fn main() {
     println!("🚀 Fast Indicators - Production Performance Processor");
     println!("====================================================");
-    
-    //println!("🔧 Демо швидкодії оптимізованих технічних індикаторів:");
-    //run_production_benchmark();
     
     println!("\n💡 Інтеграція з вашою системою:");
     println!("• Python модуль: import fast_indicators");
     println!("• Використовуйте db_utils.py та data_extraction.py для роботи з даними");
     println!("• Rust забезпечує максимальну швидкодію обчислень");
 }
-/*
-fn run_production_benchmark() {
-    let test_sizes = vec![1000, 10000, 100000];
-    
-    for size in test_sizes {
-        println!("\n📊 Бенчмарк з {} свічками:", size);
-        
-        let test_data = generate_market_data(size);
-        let start = Instant::now();
-        
-        // Швидкі розрахунки всіх індикаторів
-        let _rsi = calculate_fast_rsi(&test_data.closes, 14);
-        let _ema = calculate_fast_ema(&test_data.closes, 20);
-        let (_macd, _signal, _hist) = calculate_fast_macd(&test_data.closes, 12, 26, 9);
-        let (_upper, _lower) = calculate_fast_bollinger(&test_data.closes, 20, 2.0);
-        let _vwap = calculate_fast_vwap(&test_data.highs, &test_data.lows, &test_data.closes, &test_data.volumes);
-        let _atr = calculate_fast_atr(&test_data.highs, &test_data.lows, &test_data.closes, 14);
-        let _cci = calculate_fast_cci(&test_data.highs, &test_data.lows, &test_data.closes, 20);
-        
-        let duration = start.elapsed();
-        let ops_per_sec = size as f64 / duration.as_secs_f64();
-        
-        println!("   ⚡ Час виконання: {:?}", duration);
-        println!("   🚄 Обробка: {:.0} свічок/сек", ops_per_sec);
-    }
-}
-*/
+
 struct MarketData {
     highs: Vec<f64>,
     lows: Vec<f64>,

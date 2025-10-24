@@ -200,6 +200,8 @@ class BaseModelTrainer(ABC):
         logger.info(f"   Train: {len(self.X_train)} samples")
         logger.info(f"   Val:   {len(self.X_val)} samples")
         logger.info(f"   Test:  {len(self.X_test)} samples")
+        
+        return self.X_train, self.X_val, self.X_test, self.y_train, self.y_val, self.y_test
     
     @abstractmethod
     def build_model(self) -> tf.keras.Model:

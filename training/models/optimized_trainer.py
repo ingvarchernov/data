@@ -9,45 +9,55 @@ import sys
 import logging
 import numpy as np
 import pandas as pd
-import tensorflow as tf
-from tensorflow.keras import layers, Model
 from typing import Tuple, Dict
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from training import BaseModelTrainer, FeatureEngineer
+# TensorFlow imports with error handling
+try:
+    import tensorflow as tf
+    from tensorflow.keras import layers  # type: ignore
+    from tensorflow.keras import Model  # type: ignore
+except ImportError as e:
+    raise ImportError(
+        "TensorFlow is required but not installed. "
+        "Install it with: pip install tensorflow"
+    ) from e
+
+from training import BaseModelTrainer
+from training.rust_features import RustFeatureEngineer, RUST_AVAILABLE
 from selected_features import SELECTED_FEATURES
 from gpu_config import configure_gpu
 
 logger = logging.getLogger(__name__)
 configure_gpu()
 
-# ОПТИМАЛЬНА КОНФІГУРАЦІЯ
+# ОПТИМАЛЬНА КОНФІГУРАЦІЯ (Adjusted for GTX 1050)
 OPTIMAL_CONFIG = {
     'model_type': 'advanced_lstm',
     'sequence_length': 60,
-    'batch_size': 64,
+    'batch_size': 32,  # Reduced for GPU memory
     'epochs': 200,
     'learning_rate': 0.0005,
     'early_stopping_patience': 25,
     'reduce_lr_patience': 10,
     
-    # LSTM
-    'lstm_units_1': 320,
-    'lstm_units_2': 160,
-    'lstm_units_3': 80,
+    # LSTM - Reduced units for GTX 1050
+    'lstm_units_1': 128,
+    'lstm_units_2': 64,
+    'lstm_units_3': 32,
     
     # Attention
-    'attention_heads': 10,
-    'attention_key_dim': 80,
+    'attention_heads': 4,
+    'attention_key_dim': 32,
     
     # Dense
-    'dense_units': [640, 320, 160, 80],
+    'dense_units': [256, 128, 64],
     
     # Regularization
-    'dropout_rate': 0.4,
-    'l2_regularization': 0.01,
+    'dropout_rate': 0.3,
+    'l2_regularization': 0.001,
 }
 
 
@@ -60,16 +70,16 @@ class OptimizedTrainer(BaseModelTrainer):
         if config:
             self.config.update(config)
         
-        self.feature_engineer = FeatureEngineer()
+        self.feature_engineer = RustFeatureEngineer(use_rust=True)
         
         logger.info(f"📊 OptimizedTrainer: {symbol}, "
                    f"seq_len={self.config['sequence_length']}, "
                    f"batch={self.config['batch_size']}, "
-                   f"features={len(SELECTED_FEATURES)}")
+                   f"rust={'🦀' if RUST_AVAILABLE else '🐍'}")
     
     async def prepare_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Підготовка features з топ-35 features
+        Підготовка features через Rust індикатори
         
         Args:
             df: DataFrame з OHLCV даними
@@ -77,20 +87,14 @@ class OptimizedTrainer(BaseModelTrainer):
         Returns:
             DataFrame з розрахованими індикаторами
         """
-        # Розрахунок всіх індикаторів з правильними періодами
+        # Розрахунок всіх індикаторів через Rust
         df = self.feature_engineer.calculate_all(
             df,
-            sma_periods=[10, 20, 50, 200],  # Include sma_10
+            sma_periods=[10, 20, 50],
             ema_periods=[12, 20, 26, 50],
             rsi_periods=[7, 14, 28],
-            atr_periods=[7, 14, 28]
+            atr_periods=[7, 14, 21]
         )
-        
-        # Базові price features
-        df['returns'] = df['close'].pct_change()
-        df['log_returns'] = np.log(df['close'] / df['close'].shift(1))
-        df['price_range'] = (df['high'] - df['low']) / df['close']
-        df['volume_change'] = df['volume'].pct_change()
         
         # Відбір тільки SELECTED_FEATURES
         available_features = [f for f in SELECTED_FEATURES if f in df.columns]
@@ -220,31 +224,40 @@ class OptimizedTrainer(BaseModelTrainer):
         df = await self.prepare_features(df)
         
         # 3. Create target
-        df = self.create_target(df, shift_periods=1)
+        df['target'] = self.create_target(df, target_column='close', prediction_horizon=1)
+        df = df.dropna()
         
-        # 4. Prepare sequences
-        X, y, feature_names = self.prepare_sequences(
-            df, 
-            sequence_length=self.config['sequence_length']
-        )
+        logger.info(f"✅ Features готові: {len(df.columns)} features, {len(df)} записів")
         
-        # 5. Split data
-        X_train, X_val, X_test, y_train, y_val, y_test = self.split_data(X, y)
+        # 4. Розділення на X і y
+        feature_cols = [col for col in df.columns if col not in ['close', 'target']]
+        X = df[feature_cols].values
+        y = df['target'].values
+        
+        logger.info(f"📊 X shape: {X.shape}, y shape: {y.shape}")
+        
+        # 5. Prepare sequences
+        X_seq, y_seq = self.prepare_sequences(X, y, normalize=True)
+        
+        # 6. Split data
+        X_train, X_val, X_test, y_train, y_val, y_test = self.split_data(X_seq, y_seq)
         
         logger.info(f"📊 Data split: train={len(X_train)}, val={len(X_val)}, test={len(X_test)}")
         logger.info(f"🎯 Target stats: mean={y_train.mean():.4f}, std={y_train.std():.4f}")
         
-        # 6. Build model
+        # Save feature names
+        feature_names = feature_cols
+        
+        # 7. Build model
         self.model = self.build_model(input_shape=(X_train.shape[1], X_train.shape[2]))
         
-        # 7. Callbacks
-        callbacks = self.get_callbacks(
-            model_dir=f'models/optimized_{self.symbol}',
-            early_stopping_patience=self.config['early_stopping_patience'],
-            reduce_lr_patience=self.config['reduce_lr_patience']
-        )
+        # 8. Callbacks
+        from pathlib import Path
+        model_dir = Path(f'models/optimized_{self.symbol}')
+        model_dir.mkdir(parents=True, exist_ok=True)
+        callbacks = self.get_callbacks(model_dir=model_dir)
         
-        # 8. Train
+        # 9. Train
         logger.info("🚀 Starting training...")
         history = self.model.fit(
             X_train, y_train,
