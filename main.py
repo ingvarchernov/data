@@ -58,7 +58,7 @@ class SimpleTradingSystem:
         # Компоненти
         self.data_loader: Optional[UnifiedBinanceLoader] = None
         self.strategy_integration: Optional[StrategyIntegration] = None
-        self.binance_client: Optional[Client] = None
+        self.binance_client: Optional[Any] = None  # Client або None (якщо binance не встановлено)
         
         # Торгові дані
         self.symbols = config.get('symbols', [])

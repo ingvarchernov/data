@@ -9,10 +9,17 @@ import sys
 import logging
 import numpy as np
 import pandas as pd
-import tensorflow as tf
-from tensorflow.keras import layers, Model
 from typing import Tuple, Dict
 from datetime import datetime
+
+# TensorFlow imports - compatible with both TF 2.x versions
+try:
+    import tensorflow as tf
+    from tensorflow import keras
+    layers = keras.layers
+    Model = keras.Model
+except ImportError:
+    raise ImportError("TensorFlow is required. Install: pip install tensorflow")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -169,9 +176,12 @@ class ClassificationTrainer(BaseModelTrainer):
         
         return df
     
-    def build_model(self, input_shape: Tuple[int, int]) -> Model:
+    def build_model(self, input_shape: Tuple[int, int]):
         """
         Класифікаційна модель: Bidirectional LSTM + Multi-Head Attention
+        
+        Returns:
+            keras.Model: Compiled classification model
         """
         seq_len, n_features = input_shape
         config = self.config

@@ -9,9 +9,16 @@ import sys
 import logging
 import numpy as np
 import pandas as pd
-import tensorflow as tf
-from tensorflow.keras import layers, Model
 from typing import Tuple, Dict
+
+# TensorFlow imports - compatible with both TF 2.x versions
+try:
+    import tensorflow as tf
+    from tensorflow import keras
+    layers = keras.layers
+    Model = keras.Model
+except ImportError:
+    raise ImportError("TensorFlow is required. Install: pip install tensorflow")
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -174,9 +181,12 @@ class AdvancedTrainer(BaseModelTrainer):
         
         return df
     
-    def build_model(self, input_shape: Tuple[int, int]) -> Model:
+    def build_model(self, input_shape: Tuple[int, int]):
         """
         Deep LSTM з Multi-Head Attention
+        
+        Returns:
+            keras.Model: Compiled model
         
         Architecture:
         - 4x Bidirectional LSTM layers (deep architecture)
