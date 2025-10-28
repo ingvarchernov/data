@@ -78,10 +78,11 @@ class UnifiedBinanceLoader:
         
         # Визначення джерела даних
         if data_source == DataSource.AUTO:
-            if CCXT_AVAILABLE:
-                self.data_source = DataSource.CCXT
-            elif BINANCE_AVAILABLE:
+            # Для історичних даних завжди використовуємо python-binance, якщо доступно
+            if BINANCE_AVAILABLE:
                 self.data_source = DataSource.PYTHON_BINANCE
+            elif CCXT_AVAILABLE:
+                self.data_source = DataSource.CCXT
             else:
                 raise ImportError("Потрібно встановити python-binance або ccxt")
         else:

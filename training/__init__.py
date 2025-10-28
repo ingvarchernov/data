@@ -1,36 +1,11 @@
 """
-Training Module - Модуль для тренування моделей
-
-Містить:
-- BaseModelTrainer - базовий клас для всіх trainers
-- FeatureEngineer - розрахунок та обробка features
-- DataLoader - завантаження даних з різних джерел
-- Utilities - допоміжні функції (sequences, normalization)
-- Models - специфічні реалізації (classification, enhanced, optimized)
+Training module for Random Forest models
 """
 
-from .base_trainer import BaseModelTrainer
-from .feature_engineering import FeatureEngineer
-from .data_loader import DataLoader
-from .utils import (
-    create_sequences,
-    normalize_data,
-    split_data,
-    calculate_class_weights,
-    create_classification_targets,
-    temporal_split
-)
+from .simple_trend_classifier import SimpleTrendClassifier
+from .rust_features import RustFeatureEngineer
 
 __all__ = [
-    # Classes
-    'BaseModelTrainer',
-    'FeatureEngineer',
-    'DataLoader',
-    # Functions
-    'create_sequences',
-    'normalize_data',
-    'split_data',
-    'calculate_class_weights',
-    'create_classification_targets',
-    'temporal_split',
+    'SimpleTrendClassifier',
+    'RustFeatureEngineer',
 ]

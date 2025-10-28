@@ -4,14 +4,16 @@
 """
 import sys
 import os
+
+# Додати батьківську директорію до path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import asyncio
 import logging
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 import tensorflow as tf
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from training.rust_features import RustFeatureEngineer
 from selected_features import SELECTED_FEATURES
@@ -34,11 +36,15 @@ load_dotenv()
 class ModelAnalyzer:
     """Аналізатор моделі та генератор торгових сигналів"""
     
-    def __init__(self, symbol: str = 'BTCUSDT', model_dir: str = 'models/optimized_BTC'):
+    def __init__(self, symbol: str = 'BTCUSDT', model_dir: str = None):
         self.symbol = symbol
+        # Автоматичне визначення директорії моделі
+        if model_dir is None:
+            model_dir = f'models/optimized_{symbol}'
         self.model_dir = model_dir
         self.model = None
         self.scaler = None
+        self.features = None
         self.feature_engineer = RustFeatureEngineer(use_rust=True)
         
         # Binance loader
@@ -57,8 +63,12 @@ class ModelAnalyzer:
         """Завантаження моделі та scaler"""
         logger.info(f"📦 Завантаження моделі з {self.model_dir}")
         
-        # Завантаження моделі
-        model_path = os.path.join(self.model_dir, 'best_model.h5')
+        # Спробувати нові .keras моделі
+        model_path = os.path.join(self.model_dir, f'model_{self.symbol}_1h.keras')
+        if not os.path.exists(model_path):
+            # Fallback до старого формату
+            model_path = os.path.join(self.model_dir, 'best_model.h5')
+        
         if os.path.exists(model_path):
             self.model = tf.keras.models.load_model(model_path)
             logger.info(f"✅ Модель завантажено: {self.model.count_params():,} параметрів")
@@ -66,12 +76,24 @@ class ModelAnalyzer:
             raise FileNotFoundError(f"Модель не знайдена: {model_path}")
         
         # Завантаження scaler
-        scaler_path = os.path.join(self.model_dir, 'scaler.pkl')
+        scaler_path = os.path.join(self.model_dir, f'scaler_{self.symbol}.pkl')
+        if not os.path.exists(scaler_path):
+            scaler_path = os.path.join(self.model_dir, 'scaler.pkl')
+            
         if os.path.exists(scaler_path):
             self.scaler = joblib.load(scaler_path)
             logger.info(f"✅ Scaler завантажено")
         else:
             logger.warning("⚠️ Scaler не знайдено, нормалізація буде пропущена")
+        
+        # Завантаження списку features
+        features_path = os.path.join(self.model_dir, f'features_{self.symbol}.txt')
+        if os.path.exists(features_path):
+            with open(features_path, 'r') as f:
+                self.features = [line.strip() for line in f.readlines()]
+            logger.info(f"✅ Завантажено {len(self.features)} features")
+        else:
+            logger.warning("⚠️ Список features не знайдено, використовую SELECTED_FEATURES")
     
     async def load_recent_data(self, days: int = 7):
         """Завантаження останніх даних"""
@@ -102,20 +124,24 @@ class ModelAnalyzer:
             atr_periods=[7, 14, 21]
         )
         
-        # Визначити скільки features очікує scaler
-        expected_features = self.scaler.n_features_in_ if self.scaler else len(SELECTED_FEATURES)
+        # Advanced features якщо доступні
+        try:
+            from advanced_features import add_all_advanced_features
+            df = add_all_advanced_features(df)
+        except ImportError:
+            logger.debug("Advanced features не доступні")
         
-        # Використати тільки перші N features які очікує модель
-        features_to_use = SELECTED_FEATURES[:expected_features]
+        # Використати збережений список features або fallback
+        features_to_use = self.features if self.features else SELECTED_FEATURES
         
         # Відбір features
         available_features = [f for f in features_to_use if f in df.columns]
         missing_features = [f for f in features_to_use if f not in df.columns]
         
         if missing_features:
-            logger.warning(f"⚠️ Відсутні features: {missing_features[:5]}...")
+            logger.warning(f"⚠️ Відсутні features ({len(missing_features)}): {missing_features[:3]}...")
         
-        logger.info(f"✅ Використовується {len(available_features)}/{expected_features} features")
+        logger.info(f"✅ Використовується {len(available_features)}/{len(features_to_use)} features")
         
         # Зберігаємо close для аналізу
         df_features = df[available_features].copy()
@@ -257,7 +283,7 @@ async def main():
     
     parser = argparse.ArgumentParser(description='Аналіз моделі та генерація сигналів')
     parser.add_argument('--symbol', type=str, default='BTCUSDT', help='Торговий символ')
-    parser.add_argument('--model-dir', type=str, default='models/optimized_BTC', help='Папка з моделлю')
+    parser.add_argument('--model-dir', type=str, default=None, help='Папка з моделлю (auto: models/optimized_{symbol})')
     parser.add_argument('--days', type=int, default=7, help='Скільки днів даних завантажити')
     parser.add_argument('--threshold', type=float, default=0.005, help='Поріг для сигналів (0.005 = 0.5%)')
     parser.add_argument('--recent', type=int, default=20, help='Скільки останніх сигналів показати')

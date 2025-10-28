@@ -261,8 +261,219 @@ fn historical_volatility(
     Ok(result.into_pyarray_bound(py).into())
 }
 
+// ============ ADVANCED FEATURES (AI FACTOR) ============
+
+// RSI Divergence Detection
+#[pyfunction]
+fn rsi_divergence(
+    py: Python,
+    prices: PyReadonlyArray1<f64>,
+    rsi: PyReadonlyArray1<f64>,
+    period: usize,
+) -> PyResult<(Py<PyArray1<f64>>, Py<PyArray1<f64>>)> {
+    let prices = prices.as_slice()?;
+    let rsi = rsi.as_slice()?;
+    let len = prices.len();
+    
+    let mut bull_div = vec![0.0; len];
+    let mut bear_div = vec![0.0; len];
+    
+    if len < period + 1 {
+        return Ok((bull_div.into_pyarray_bound(py).into(), bear_div.into_pyarray_bound(py).into()));
+    }
+    
+    for i in period..len {
+        let price_change = prices[i] - prices[i - period];
+        let rsi_change = rsi[i] - rsi[i - period];
+        
+        // Bullish divergence: price down, RSI up
+        if price_change < 0.0 && rsi_change > 0.0 {
+            bull_div[i] = 1.0;
+        }
+        
+        // Bearish divergence: price up, RSI down
+        if price_change > 0.0 && rsi_change < 0.0 {
+            bear_div[i] = 1.0;
+        }
+    }
+    
+    Ok((bull_div.into_pyarray_bound(py).into(), bear_div.into_pyarray_bound(py).into()))
+}
+
+// MACD Histogram Acceleration
+#[pyfunction]
+fn macd_histogram_accel(
+    py: Python,
+    macd: PyReadonlyArray1<f64>,
+    signal: PyReadonlyArray1<f64>,
+) -> PyResult<Py<PyArray1<f64>>> {
+    let macd = macd.as_slice()?;
+    let signal = signal.as_slice()?;
+    let len = macd.len();
+    
+    let mut result = vec![f64::NAN; len];
+    
+    for i in 2..len {
+        let hist_prev = macd[i-1] - signal[i-1];
+        let hist_curr = macd[i] - signal[i];
+        result[i] = hist_curr - hist_prev;
+    }
+    
+    Ok(result.into_pyarray_bound(py).into())
+}
+
+// Bollinger Squeeze Detection
+#[pyfunction]
+fn bollinger_squeeze(
+    py: Python,
+    bb_width: PyReadonlyArray1<f64>,
+    period: usize,
+) -> PyResult<Py<PyArray1<f64>>> {
+    let bb_width = bb_width.as_slice()?;
+    let len = bb_width.len();
+    let mut result = vec![0.0; len];
+    
+    for i in period..len {
+        let min_width = bb_width[i - period..i]
+            .iter()
+            .filter(|x| !x.is_nan())
+            .fold(f64::INFINITY, |a, &b| a.min(b));
+        
+        if (bb_width[i] - min_width).abs() < 1e-10 {
+            result[i] = 1.0;
+        }
+    }
+    
+    Ok(result.into_pyarray_bound(py).into())
+}
+
+// Volume Spike Detection
+#[pyfunction]
+fn volume_spike(
+    py: Python,
+    volume: PyReadonlyArray1<f64>,
+    threshold: f64,
+) -> PyResult<Py<PyArray1<f64>>> {
+    let volume = volume.as_slice()?;
+    let len = volume.len();
+    let mut result = vec![0.0; len];
+    
+    let period = 20;
+    for i in period..len {
+        let mean_vol: f64 = volume[i - period..i].iter().sum::<f64>() / period as f64;
+        if volume[i] > mean_vol * threshold {
+            result[i] = 1.0;
+        }
+    }
+    
+    Ok(result.into_pyarray_bound(py).into())
+}
+
+// Trend Direction Multi-Timeframe
+#[pyfunction]
+fn trend_direction(
+    py: Python,
+    prices: PyReadonlyArray1<f64>,
+    period: usize,
+) -> PyResult<Py<PyArray1<f64>>> {
+    let prices = prices.as_slice()?;
+    let len = prices.len();
+    let mut result = vec![f64::NAN; len];
+    
+    for i in period..len {
+        if prices[i] > prices[i - period] {
+            result[i] = 1.0;
+        } else {
+            result[i] = 0.0;
+        }
+    }
+    
+    Ok(result.into_pyarray_bound(py).into())
+}
+
+// True Range
+#[pyfunction]
+fn true_range(
+    py: Python,
+    high: PyReadonlyArray1<f64>,
+    low: PyReadonlyArray1<f64>,
+    close: PyReadonlyArray1<f64>,
+) -> PyResult<Py<PyArray1<f64>>> {
+    let high = high.as_slice()?;
+    let low = low.as_slice()?;
+    let close = close.as_slice()?;
+    let len = high.len();
+    
+    let mut result = vec![f64::NAN; len];
+    
+    result[0] = high[0] - low[0];
+    
+    for i in 1..len {
+        let hl = high[i] - low[i];
+        let hc = (high[i] - close[i-1]).abs();
+        let lc = (low[i] - close[i-1]).abs();
+        result[i] = hl.max(hc).max(lc);
+    }
+    
+    Ok(result.into_pyarray_bound(py).into())
+}
+
+// Support/Resistance Levels
+#[pyfunction]
+fn support_resistance(
+    py: Python,
+    high: PyReadonlyArray1<f64>,
+    low: PyReadonlyArray1<f64>,
+    period: usize,
+) -> PyResult<(Py<PyArray1<f64>>, Py<PyArray1<f64>>)> {
+    let high = high.as_slice()?;
+    let low = low.as_slice()?;
+    let len = high.len();
+    
+    let mut resistance = vec![f64::NAN; len];
+    let mut support = vec![f64::NAN; len];
+    
+    for i in period..len {
+        resistance[i] = high[i - period..i]
+            .iter()
+            .filter(|x| !x.is_nan())
+            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        
+        support[i] = low[i - period..i]
+            .iter()
+            .filter(|x| !x.is_nan())
+            .fold(f64::INFINITY, |a, &b| a.min(b));
+    }
+    
+    Ok((resistance.into_pyarray_bound(py).into(), support.into_pyarray_bound(py).into()))
+}
+
+// Price-Volume Correlation
+#[pyfunction]
+fn price_volume_correlation(
+    py: Python,
+    prices: PyReadonlyArray1<f64>,
+    volume: PyReadonlyArray1<f64>,
+    period: usize,
+) -> PyResult<Py<PyArray1<f64>>> {
+    let prices = prices.as_slice()?;
+    let volume = volume.as_slice()?;
+    let len = prices.len();
+    
+    let mut result = vec![f64::NAN; len];
+    
+    for i in period..len {
+        let price_change = (prices[i] - prices[i - period]) / prices[i - period];
+        let volume_change = (volume[i] - volume[i - period]) / volume[i - period];
+        result[i] = price_change * volume_change;
+    }
+    
+    Ok(result.into_pyarray_bound(py).into())
+}
+
 #[pymodule]
 fn fast_indicators(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Original indicators
     m.add_function(wrap_pyfunction!(sma, m)?)?;
     m.add_function(wrap_pyfunction!(ema, m)?)?;
     m.add_function(wrap_pyfunction!(rsi, m)?)?;
@@ -271,5 +482,16 @@ fn fast_indicators(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vwap, m)?)?;
     m.add_function(wrap_pyfunction!(rolling_std, m)?)?;
     m.add_function(wrap_pyfunction!(historical_volatility, m)?)?;
+    
+    // Advanced features (AI Factor)
+    m.add_function(wrap_pyfunction!(rsi_divergence, m)?)?;
+    m.add_function(wrap_pyfunction!(macd_histogram_accel, m)?)?;
+    m.add_function(wrap_pyfunction!(bollinger_squeeze, m)?)?;
+    m.add_function(wrap_pyfunction!(volume_spike, m)?)?;
+    m.add_function(wrap_pyfunction!(trend_direction, m)?)?;
+    m.add_function(wrap_pyfunction!(true_range, m)?)?;
+    m.add_function(wrap_pyfunction!(support_resistance, m)?)?;
+    m.add_function(wrap_pyfunction!(price_volume_correlation, m)?)?;
+    
     Ok(())
 }

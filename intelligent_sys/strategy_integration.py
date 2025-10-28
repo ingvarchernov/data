@@ -62,21 +62,30 @@ class StrategyIntegration:
             if parent_dir not in sys.path:
                 sys.path.insert(0, parent_dir)
             
-            # Імпорт StrategyManager
-            from strategy_manager import StrategyManager
+            # Імпорт стратегій напряму
+            from strategies.scalping import ScalpingStrategy
+            from strategies.day_trading import DayTradingStrategy
+            from strategies.swing_trading import SwingTradingStrategy
             
-            # Створення Strategy Manager
-            self.strategy_manager = StrategyManager(
-                symbols=self.symbols,
-                portfolio_value=self.portfolio_value,
-                enable_scalping=self.strategy_config.get('enable_scalping', False),
-                enable_day_trading=self.strategy_config.get('enable_day_trading', True),
-                enable_swing_trading=self.strategy_config.get('enable_swing_trading', True),
-                risk_config=self.strategy_config.get('risk_config', {})
-            )
+            # Ініціалізація активних стратегій
+            self.active_strategies = []
+            
+            if self.strategy_config.get('enable_scalping', False):
+                self.active_strategies.append(ScalpingStrategy(self.symbols))
+                logger.info("✅ Scalping strategy enabled")
+                
+            if self.strategy_config.get('enable_day_trading', True):
+                self.active_strategies.append(DayTradingStrategy(self.symbols))
+                logger.info("✅ Day trading strategy enabled")
+                
+            if self.strategy_config.get('enable_swing_trading', True):
+                self.active_strategies.append(SwingTradingStrategy(self.symbols))
+                logger.info("✅ Swing trading strategy enabled")
+            
+            self.strategy_manager = None  # Не використовуємо manager
             
             self.initialized = True
-            logger.info("✅ Strategy Manager ініціалізовано успішно")
+            logger.info(f"✅ Strategies initialized: {len(self.active_strategies)} active")
             return True
             
         except Exception as e:
@@ -98,8 +107,8 @@ class StrategyIntegration:
         Returns:
             Dict з торговими сигналами
         """
-        if not self.initialized or not self.strategy_manager:
-            logger.warning("⚠️ Strategy Manager не ініціалізовано")
+        if not self.initialized or not self.active_strategies:
+            logger.warning("⚠️ Strategies не ініціалізовано")
             return {}
         
         try:
@@ -107,16 +116,27 @@ class StrategyIntegration:
             if predictions is None:
                 predictions = self._create_dummy_predictions(market_data)
             
-            # Генерація сигналів через Strategy Manager
-            signals = await self.strategy_manager.analyze_and_generate_signals(
-                market_data=market_data,
-                predictions=predictions
-            )
+            # Генерація сигналів з усіх активних стратегій
+            all_signals = {}
+            for strategy in self.active_strategies:
+                try:
+                    # Перевіряємо чи метод async
+                    if hasattr(strategy.analyze_market, '__call__'):
+                        import inspect
+                        if inspect.iscoroutinefunction(strategy.analyze_market):
+                            strategy_signals = await strategy.analyze_market(market_data, predictions)
+                        else:
+                            strategy_signals = strategy.analyze_market(market_data, predictions)
+                    else:
+                        strategy_signals = strategy.analyze_market(market_data, predictions)
+                    all_signals.update(strategy_signals)
+                except Exception as e:
+                    logger.error(f"❌ Помилка в {strategy.name}: {e}")
             
-            if signals:
-                logger.info(f"📊 Згенеровано {len(signals)} торгових сигналів")
+            if all_signals:
+                logger.info(f"📊 Згенеровано {len(all_signals)} торгових сигналів")
             
-            return signals
+            return all_signals
             
         except Exception as e:
             logger.error(f"❌ Помилка генерації сигналів: {e}", exc_info=True)
@@ -170,15 +190,24 @@ class StrategyIntegration:
         Returns:
             Dict[symbol, should_close]: Рішення про закриття
         """
-        if not self.initialized or not self.strategy_manager:
-            logger.warning("⚠️ Strategy Manager не ініціалізовано")
+        if not self.initialized or not self.active_strategies:
+            logger.warning("⚠️ Strategies не ініціалізовано")
             return {}
         
         try:
-            close_decisions = await self.strategy_manager.should_close_positions(
-                current_prices=current_prices,
-                market_data=market_data
-            )
+            # Перевірка для кожної стратегії
+            close_decisions = {}
+            for strategy in self.active_strategies:
+                try:
+                    # Перевіряємо позиції стратегії
+                    for symbol in strategy.symbols:
+                        if symbol in strategy.positions and strategy.positions[symbol]:
+                            position = strategy.positions[symbol]
+                            current_price = current_prices.get(symbol, 0)
+                            if current_price and strategy._should_close_position(position, current_price):
+                                close_decisions[symbol] = True
+                except Exception as e:
+                    logger.error(f"❌ Помилка перевірки {strategy.name}: {e}")
             
             if close_decisions:
                 logger.info(f"🔔 Рекомендовано закрити {len(close_decisions)} позицій")
@@ -196,11 +225,18 @@ class StrategyIntegration:
         Returns:
             (is_valid, reason)
         """
-        if not self.initialized or not self.strategy_manager:
-            return False, "Strategy Manager не ініціалізовано"
+        if not self.initialized or not self.active_strategies:
+            return False, "Strategies не ініціалізовано"
         
         try:
-            return self.strategy_manager.validate_signal(signal)
+            # Базова валідація
+            if not hasattr(signal, 'action') or not hasattr(signal, 'confidence'):
+                return False, "Невалідна структура сигналу"
+            
+            if signal.confidence < 0.05:
+                return False, f"Занадто низька впевненість: {signal.confidence}"
+            
+            return True, "OK"
         except Exception as e:
             logger.error(f"❌ Помилка валідації сигналу: {e}")
             return False, str(e)
@@ -212,12 +248,15 @@ class StrategyIntegration:
         Returns:
             float: Розмір позиції
         """
-        if not self.initialized or not self.strategy_manager:
-            logger.warning("⚠️ Strategy Manager не ініціалізовано")
+        if not self.initialized or not self.active_strategies:
+            logger.warning("⚠️ Strategies не ініціалізовано")
             return 0.0
         
         try:
-            return self.strategy_manager.calculate_position_size(signal)
+            # Базовий розрахунок: 2% від портфеля з урахуванням впевненості
+            base_risk = self.portfolio_value * 0.02
+            position_size = base_risk * signal.confidence
+            return position_size
         except Exception as e:
             logger.error(f"❌ Помилка розрахунку розміру позиції: {e}")
             return 0.0
@@ -231,12 +270,16 @@ class StrategyIntegration:
             pnl: Прибуток/збиток
             strategy_name: Назва стратегії (опціонально)
         """
-        if not self.initialized or not self.strategy_manager:
-            logger.warning("⚠️ Strategy Manager не ініціалізовано")
+        if not self.initialized or not self.active_strategies:
+            logger.warning("⚠️ Strategies не ініціалізовано")
             return
         
         try:
-            self.strategy_manager.record_trade(symbol, pnl, strategy_name)
+            # Записуємо в відповідну стратегію
+            for strategy in self.active_strategies:
+                if strategy_name and strategy.name == strategy_name:
+                    strategy.record_trade(symbol, pnl)
+                    break
             logger.debug(f"📝 Записано угоду {symbol}: PnL=${pnl:.2f}")
         except Exception as e:
             logger.error(f"❌ Помилка запису угоди: {e}")
@@ -248,12 +291,11 @@ class StrategyIntegration:
         Args:
             new_value: Нова вартість портфеля
         """
-        if not self.initialized or not self.strategy_manager:
+        if not self.initialized or not self.active_strategies:
             return
         
         try:
             self.portfolio_value = new_value
-            self.strategy_manager.update_portfolio_value(new_value)
             logger.debug(f"💰 Портфель оновлено: ${new_value:.2f}")
         except Exception as e:
             logger.error(f"❌ Помилка оновлення портфеля: {e}")
@@ -265,7 +307,7 @@ class StrategyIntegration:
         Returns:
             Dict з метриками продуктивності
         """
-        if not self.initialized or not self.strategy_manager:
+        if not self.initialized or not self.active_strategies:
             return {
                 'initialized': False,
                 'portfolio_value': self.portfolio_value,
@@ -274,18 +316,43 @@ class StrategyIntegration:
             }
         
         try:
-            return self.strategy_manager.get_performance_summary()
+            # Збираємо статистику з усіх стратегій
+            summary = {
+                'portfolio_value': self.portfolio_value,
+                'strategies': {}
+            }
+            
+            total_trades = 0
+            total_winning = 0
+            
+            for strategy in self.active_strategies:
+                strategy_stats = {
+                    'name': strategy.name,
+                    'total_trades': getattr(strategy, 'total_trades', 0),
+                    'winning_trades': getattr(strategy, 'winning_trades', 0),
+                    'total_pnl': getattr(strategy, 'total_pnl', 0.0)
+                }
+                summary['strategies'][strategy.name] = strategy_stats
+                total_trades += strategy_stats['total_trades']
+                total_winning += strategy_stats['winning_trades']
+            
+            summary['total_trades'] = total_trades
+            summary['win_rate'] = (total_winning / total_trades * 100) if total_trades > 0 else 0.0
+            
+            return summary
         except Exception as e:
             logger.error(f"❌ Помилка отримання статистики: {e}")
             return {'error': str(e)}
     
     def reset_daily_stats(self):
         """Скидання денної статистики"""
-        if not self.initialized or not self.strategy_manager:
+        if not self.initialized or not self.active_strategies:
             return
         
         try:
-            self.strategy_manager.reset_daily_stats()
+            for strategy in self.active_strategies:
+                if hasattr(strategy, 'reset_daily_stats'):
+                    strategy.reset_daily_stats()
             logger.info("🔄 Денна статистика стратегій скинута")
         except Exception as e:
             logger.error(f"❌ Помилка скидання статистики: {e}")
@@ -297,18 +364,19 @@ class StrategyIntegration:
         Returns:
             Dict з активними позиціями по всіх стратегіях
         """
-        if not self.initialized or not self.strategy_manager:
+        if not self.initialized or not self.active_strategies:
             return {}
         
         try:
             all_positions = {}
-            for strategy_name, strategy in self.strategy_manager.strategies.items():
+            for strategy in self.active_strategies:
                 for symbol, position in strategy.positions.items():
-                    all_positions[f"{strategy_name}_{symbol}"] = {
-                        'strategy': strategy_name,
-                        'symbol': symbol,
-                        'position': position
-                    }
+                    if position:  # Якщо позиція активна
+                        all_positions[f"{strategy.name}_{symbol}"] = {
+                            'strategy': strategy.name,
+                            'symbol': symbol,
+                            'position': position
+                        }
             return all_positions
         except Exception as e:
             logger.error(f"❌ Помилка отримання позицій: {e}")
@@ -316,9 +384,10 @@ class StrategyIntegration:
     
     def shutdown(self):
         """Коректне завершення роботи"""
-        if self.strategy_manager:
+        if self.active_strategies:
             logger.info("🔄 Завершення роботи Strategy Integration...")
-            # Тут можна додати логіку закриття позицій, якщо потрібно
+            # Очищаємо стратегії
+            self.active_strategies.clear()
         
         self.initialized = False
         logger.info("✅ Strategy Integration завершено")
