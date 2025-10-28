@@ -18,10 +18,10 @@ try:
             count = result.scalar()
             print(f'📊 {table}: {count} записів')
             
-        result = conn.execute(text('SELECT symbol, side, entry_price, status, created_at FROM positions ORDER BY created_at DESC LIMIT 3'))
+        result = conn.execute(text('SELECT symbol, side, entry_price, status FROM positions LIMIT 10'))
         positions = result.fetchall()
         if positions:
-            print('\n📈 Останні позиції:')
+            print('\n📈 Відкриті позиції:')
             for pos in positions:
                 print(f'  {pos.symbol} {pos.side} @ ${pos.entry_price} - {pos.status}')
                 
