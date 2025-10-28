@@ -6,12 +6,17 @@ Multi-Strategy Trading Bot
 import asyncio
 import argparse
 import logging
+import os
 from datetime import datetime
 from binance.client import Client
+from dotenv import load_dotenv
 
 from strategies.trend_strategy_4h import TrendStrategy4h
 from strategy_manager import StrategyManager
 from telegram_bot import TelegramNotifier
+
+# Завантажуємо .env
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,10 +41,16 @@ class MultiStrategyBot:
         enable_trading: bool = False,
         use_all_symbols: bool = False
     ):
-        # Binance client
+        # Binance client - використовуємо ключі з .env
         if testnet:
-            api_key = "9be7e1fae31b26ee6d3be23e1c3e4c8eca0d7a265e37fef5f91259e3a4cf9286"
-            api_secret = "ba1b2cfce24e65f6f374e1e78c7ea5e803ec1cab06d89e4b3e7b5ba46e4b20a6"
+            api_key = os.getenv('FUTURES_API_KEY')
+            api_secret = os.getenv('FUTURES_API_SECRET')
+            
+            if not api_key or not api_secret:
+                logger.warning("⚠️ API ключі не знайдені в .env, використовуємо старі")
+                api_key = "9be7e1fae31b26ee6d3be23e1c3e4c8eca0d7a265e37fef5f91259e3a4cf9286"
+                api_secret = "ba1b2cfce24e65f6f374e1e78c7ea5e803ec1cab06d89e4b3e7b5ba46e4b20a6"
+            
             logger.info("✅ Binance client (TESTNET)")
         else:
             raise NotImplementedError("Real trading не реалізовано")

@@ -36,7 +36,8 @@ class TrendStrategy4h(BaseStrategy):
             take_profit_pct=0.05
         )
         self.testnet = testnet
-        self.feature_calculator = SimpleTrendClassifier()
+        # Feature calculator буде створюватись для кожного символу окремо
+        self.feature_calculators = {}
         
     async def load_models(self):
         """Завантаження моделей для всіх символів"""
@@ -82,8 +83,12 @@ class TrendStrategy4h(BaseStrategy):
             if symbol not in self.models:
                 return None
             
+            # Створюємо feature calculator для символу якщо потрібно
+            if symbol not in self.feature_calculators:
+                self.feature_calculators[symbol] = SimpleTrendClassifier(symbol=symbol, timeframe='4h')
+            
             # Розрахунок features
-            df_features = self.feature_calculator.calculate_features(df)
+            df_features = self.feature_calculators[symbol]._create_simple_features(df)
             
             if df_features.empty or len(df_features) == 0:
                 logger.warning(f"⚠️ {symbol}: немає features")

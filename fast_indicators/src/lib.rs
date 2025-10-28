@@ -5,16 +5,17 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 fn sma_calc(data: &[f64], period: usize) -> Vec<f64> {
     let len = data.len();
     let mut result = vec![f64::NAN; len];
-    
-    if len < period {
+
+    if len < period || period == 0 {
         return result;
     }
-    
+
     for i in (period - 1)..len {
         let mut sum = 0.0;
         let mut count = 0;
-        for j in (i - period + 1)..=i {
-            if !data[j].is_nan() {
+        let start_idx = i.saturating_sub(period - 1);
+        for j in start_idx..=i {
+            if j < data.len() && !data[j].is_nan() {
                 sum += data[j];
                 count += 1;
             }
@@ -23,7 +24,7 @@ fn sma_calc(data: &[f64], period: usize) -> Vec<f64> {
             result[i] = sum / count as f64;
         }
     }
-    
+
     result
 }
 
@@ -31,13 +32,13 @@ fn sma_calc(data: &[f64], period: usize) -> Vec<f64> {
 fn ema_calc(data: &[f64], period: usize) -> Vec<f64> {
     let len = data.len();
     let mut result = vec![f64::NAN; len];
-    
+
     if len < period {
         return result;
     }
-    
+
     let multiplier = 2.0 / (period as f64 + 1.0);
-    
+
     let mut sum = 0.0;
     let mut count = 0;
     for i in 0..period {
@@ -46,17 +47,17 @@ fn ema_calc(data: &[f64], period: usize) -> Vec<f64> {
             count += 1;
         }
     }
-    
+
     if count > 0 {
         result[period - 1] = sum / count as f64;
-        
+
         for i in period..len {
             if !data[i].is_nan() && !result[i - 1].is_nan() {
                 result[i] = (data[i] - result[i - 1]) * multiplier + result[i - 1];
             }
         }
     }
-    
+
     result
 }
 
@@ -89,7 +90,7 @@ fn rsi(py: Python, prices: PyReadonlyArray1<f64>, period: usize) -> PyResult<Py<
     let mut result = vec![f64::NAN; len];
     let mut avg_gain = 0.0;
     let mut avg_loss = 0.0;
-    
+
     for i in 1..=period {
         let change = prices[i] - prices[i - 1];
         if change > 0.0 {
@@ -98,7 +99,7 @@ fn rsi(py: Python, prices: PyReadonlyArray1<f64>, period: usize) -> PyResult<Py<
             avg_loss += change.abs();
         }
     }
-    
+
     avg_gain /= period as f64;
     avg_loss /= period as f64;
 
@@ -141,16 +142,16 @@ fn atr(
     let low = low.as_slice()?;
     let close = close.as_slice()?;
     let len = close.len();
-    
+
     let mut tr = vec![f64::NAN; len];
-    
+
     for i in 1..len {
         let tr1 = high[i] - low[i];
         let tr2 = (high[i] - close[i - 1]).abs();
         let tr3 = (low[i] - close[i - 1]).abs();
         tr[i] = tr1.max(tr2).max(tr3);
     }
-    
+
     let result = sma_calc(&tr, period);
     Ok(result.into_pyarray_bound(py).into())
 }
@@ -165,9 +166,9 @@ fn obv(
     let close = close.as_slice()?;
     let volume = volume.as_slice()?;
     let len = close.len();
-    
+
     let mut result = vec![0.0; len];
-    
+
     for i in 1..len {
         let direction = if close[i] > close[i - 1] {
             1.0
@@ -176,10 +177,10 @@ fn obv(
         } else {
             0.0
         };
-        
+
         result[i] = result[i - 1] + (direction * volume[i]);
     }
-    
+
     Ok(result.into_pyarray_bound(py).into())
 }
 
@@ -197,21 +198,21 @@ fn vwap(
     let close = close.as_slice()?;
     let volume = volume.as_slice()?;
     let len = close.len();
-    
+
     let mut result = vec![f64::NAN; len];
     let mut cumulative_tpv = 0.0;
     let mut cumulative_volume = 0.0;
-    
+
     for i in 0..len {
         let typical_price = (high[i] + low[i] + close[i]) / 3.0;
         cumulative_tpv += typical_price * volume[i];
         cumulative_volume += volume[i];
-        
+
         if cumulative_volume > 0.0 {
             result[i] = cumulative_tpv / cumulative_volume;
         }
     }
-    
+
     Ok(result.into_pyarray_bound(py).into())
 }
 
@@ -225,16 +226,21 @@ fn rolling_std(
     let data = data.as_slice()?;
     let len = data.len();
     let mut result = vec![f64::NAN; len];
-    
+
+    if period == 0 || len < period {
+        return Ok(result.into_pyarray_bound(py).into());
+    }
+
     for i in (period - 1)..len {
-        let mean: f64 = data[i - period + 1..=i].iter().sum::<f64>() / period as f64;
-        let variance: f64 = data[i - period + 1..=i]
+        let start_idx = i.saturating_sub(period - 1);
+        let mean: f64 = data[start_idx..=i].iter().sum::<f64>() / period as f64;
+        let variance: f64 = data[start_idx..=i]
             .iter()
             .map(|&x| (x - mean).powi(2))
             .sum::<f64>() / period as f64;
         result[i] = variance.sqrt();
     }
-    
+
     Ok(result.into_pyarray_bound(py).into())
 }
 
@@ -248,16 +254,21 @@ fn historical_volatility(
     let returns = returns.as_slice()?;
     let len = returns.len();
     let mut result = vec![f64::NAN; len];
-    
+
+    if period == 0 || len < period {
+        return Ok(result.into_pyarray_bound(py).into());
+    }
+
     for i in (period - 1)..len {
-        let mean: f64 = returns[i - period + 1..=i].iter().sum::<f64>() / period as f64;
-        let variance: f64 = returns[i - period + 1..=i]
+        let start_idx = i.saturating_sub(period - 1);
+        let mean: f64 = returns[start_idx..=i].iter().sum::<f64>() / period as f64;
+        let variance: f64 = returns[start_idx..=i]
             .iter()
             .map(|&x| (x - mean).powi(2))
             .sum::<f64>() / period as f64;
         result[i] = variance.sqrt() * (252.0_f64).sqrt();
     }
-    
+
     Ok(result.into_pyarray_bound(py).into())
 }
 
@@ -274,29 +285,29 @@ fn rsi_divergence(
     let prices = prices.as_slice()?;
     let rsi = rsi.as_slice()?;
     let len = prices.len();
-    
+
     let mut bull_div = vec![0.0; len];
     let mut bear_div = vec![0.0; len];
-    
+
     if len < period + 1 {
         return Ok((bull_div.into_pyarray_bound(py).into(), bear_div.into_pyarray_bound(py).into()));
     }
-    
+
     for i in period..len {
         let price_change = prices[i] - prices[i - period];
         let rsi_change = rsi[i] - rsi[i - period];
-        
+
         // Bullish divergence: price down, RSI up
         if price_change < 0.0 && rsi_change > 0.0 {
             bull_div[i] = 1.0;
         }
-        
+
         // Bearish divergence: price up, RSI down
         if price_change > 0.0 && rsi_change < 0.0 {
             bear_div[i] = 1.0;
         }
     }
-    
+
     Ok((bull_div.into_pyarray_bound(py).into(), bear_div.into_pyarray_bound(py).into()))
 }
 
@@ -310,15 +321,15 @@ fn macd_histogram_accel(
     let macd = macd.as_slice()?;
     let signal = signal.as_slice()?;
     let len = macd.len();
-    
+
     let mut result = vec![f64::NAN; len];
-    
+
     for i in 2..len {
         let hist_prev = macd[i-1] - signal[i-1];
         let hist_curr = macd[i] - signal[i];
         result[i] = hist_curr - hist_prev;
     }
-    
+
     Ok(result.into_pyarray_bound(py).into())
 }
 
@@ -332,18 +343,18 @@ fn bollinger_squeeze(
     let bb_width = bb_width.as_slice()?;
     let len = bb_width.len();
     let mut result = vec![0.0; len];
-    
+
     for i in period..len {
         let min_width = bb_width[i - period..i]
             .iter()
             .filter(|x| !x.is_nan())
             .fold(f64::INFINITY, |a, &b| a.min(b));
-        
+
         if (bb_width[i] - min_width).abs() < 1e-10 {
             result[i] = 1.0;
         }
     }
-    
+
     Ok(result.into_pyarray_bound(py).into())
 }
 
@@ -357,7 +368,7 @@ fn volume_spike(
     let volume = volume.as_slice()?;
     let len = volume.len();
     let mut result = vec![0.0; len];
-    
+
     let period = 20;
     for i in period..len {
         let mean_vol: f64 = volume[i - period..i].iter().sum::<f64>() / period as f64;
@@ -365,7 +376,7 @@ fn volume_spike(
             result[i] = 1.0;
         }
     }
-    
+
     Ok(result.into_pyarray_bound(py).into())
 }
 
@@ -379,7 +390,7 @@ fn trend_direction(
     let prices = prices.as_slice()?;
     let len = prices.len();
     let mut result = vec![f64::NAN; len];
-    
+
     for i in period..len {
         if prices[i] > prices[i - period] {
             result[i] = 1.0;
@@ -387,7 +398,7 @@ fn trend_direction(
             result[i] = 0.0;
         }
     }
-    
+
     Ok(result.into_pyarray_bound(py).into())
 }
 
@@ -403,18 +414,18 @@ fn true_range(
     let low = low.as_slice()?;
     let close = close.as_slice()?;
     let len = high.len();
-    
+
     let mut result = vec![f64::NAN; len];
-    
+
     result[0] = high[0] - low[0];
-    
+
     for i in 1..len {
         let hl = high[i] - low[i];
         let hc = (high[i] - close[i-1]).abs();
         let lc = (low[i] - close[i-1]).abs();
         result[i] = hl.max(hc).max(lc);
     }
-    
+
     Ok(result.into_pyarray_bound(py).into())
 }
 
@@ -429,22 +440,22 @@ fn support_resistance(
     let high = high.as_slice()?;
     let low = low.as_slice()?;
     let len = high.len();
-    
+
     let mut resistance = vec![f64::NAN; len];
     let mut support = vec![f64::NAN; len];
-    
+
     for i in period..len {
         resistance[i] = high[i - period..i]
             .iter()
             .filter(|x| !x.is_nan())
             .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        
+
         support[i] = low[i - period..i]
             .iter()
             .filter(|x| !x.is_nan())
             .fold(f64::INFINITY, |a, &b| a.min(b));
     }
-    
+
     Ok((resistance.into_pyarray_bound(py).into(), support.into_pyarray_bound(py).into()))
 }
 
@@ -459,15 +470,15 @@ fn price_volume_correlation(
     let prices = prices.as_slice()?;
     let volume = volume.as_slice()?;
     let len = prices.len();
-    
+
     let mut result = vec![f64::NAN; len];
-    
+
     for i in period..len {
         let price_change = (prices[i] - prices[i - period]) / prices[i - period];
         let volume_change = (volume[i] - volume[i - period]) / volume[i - period];
         result[i] = price_change * volume_change;
     }
-    
+
     Ok(result.into_pyarray_bound(py).into())
 }
 
@@ -482,7 +493,7 @@ fn fast_indicators(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vwap, m)?)?;
     m.add_function(wrap_pyfunction!(rolling_std, m)?)?;
     m.add_function(wrap_pyfunction!(historical_volatility, m)?)?;
-    
+
     // Advanced features (AI Factor)
     m.add_function(wrap_pyfunction!(rsi_divergence, m)?)?;
     m.add_function(wrap_pyfunction!(macd_histogram_accel, m)?)?;
@@ -492,6 +503,6 @@ fn fast_indicators(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(true_range, m)?)?;
     m.add_function(wrap_pyfunction!(support_resistance, m)?)?;
     m.add_function(wrap_pyfunction!(price_volume_correlation, m)?)?;
-    
+
     Ok(())
 }
