@@ -42,10 +42,10 @@ class RustFeatureEngineer:
     def calculate_all(
         self,
         df: pd.DataFrame,
-        sma_periods: List[int] = [10, 20, 50],
-        ema_periods: List[int] = [12, 20, 26, 50],
-        rsi_periods: List[int] = [7, 14, 28],
-        atr_periods: List[int] = [7, 14, 21],
+        sma_periods: List[int] = [5, 10, 20, 50, 100, 200],
+        ema_periods: List[int] = [9, 12, 21, 26, 50],
+        rsi_periods: List[int] = [7, 14, 21, 28],
+        atr_periods: List[int] = [14, 21],
     ) -> pd.DataFrame:
         """
         Розрахунок всіх індикаторів через Rust
@@ -63,11 +63,11 @@ class RustFeatureEngineer:
         logger.info("📊 Розрахунок індикаторів через Rust...")
         result = df.copy()
         
-        # Convert to numpy arrays
-        close = result['close'].values
-        high = result['high'].values
-        low = result['low'].values
-        volume = result['volume'].values
+        # Convert to numpy arrays with proper dtype
+        close = result['close'].values.astype(np.float64)
+        high = result['high'].values.astype(np.float64)
+        low = result['low'].values.astype(np.float64)
+        volume = result['volume'].values.astype(np.float64)
         
         # Basic features
         result['returns'] = result['close'].pct_change()
@@ -140,19 +140,47 @@ class RustFeatureEngineer:
             )
             result[f'bb_percent_{period}'] = (
                 (close - result[f'bb_lower_{period}'].values) /
-                (result[f'bb_upper_{period}'].values - result[f'bb_lower_{period}'].values)
+                (result[f'bb_upper_{period}'].values - result[f'bb_lower_{period}'].values + 1e-8)
             )
         
         # ROC
         for period in [5, 10, 20]:
             result[f'roc_{period}'] = ((close - np.roll(close, period)) / np.roll(close, period)) * 100
         
-        # Remove NaN
-        result = result.replace([np.inf, -np.inf], np.nan)
-        result = result.dropna()
+        # Additional features from training
+        # Golden cross / Death cross
+        result['golden_cross'] = (result['sma_50'] > result['sma_200']).astype(int) - (result['sma_50'] < result['sma_200']).astype(int)
         
-        features_count = len(result.columns)
-        logger.info(f"✅ Розраховано {features_count} features ({len(result)} записів)")
+        # MACD cross (simplified)
+        ema_12 = fi.ema(close, 12)
+        ema_26 = fi.ema(close, 26)
+        macd = ema_12 - ema_26
+        signal = fi.ema(macd, 9)
+        result['macd_cross'] = (macd > signal).astype(int) - (macd < signal).astype(int)
+        
+        # Volume features
+        result['volume_sma20'] = fi.sma(volume, 20)
+        result['volume_trend'] = result['volume'].rolling(5).mean() / result['volume'].rolling(20).mean()
+        
+        # RSI signals
+        result['rsi_overbought'] = (result['rsi_14'] > 70).astype(int)
+        result['rsi_oversold'] = (result['rsi_14'] < 30).astype(int)
+        
+        # Momentum
+        result['momentum_5'] = result['close'] / result['close'].shift(5) - 1
+        result['momentum_10'] = result['close'] / result['close'].shift(10) - 1
+        result['momentum_20'] = result['close'] / result['close'].shift(20) - 1
+        
+        # Volatility
+        result['volatility_20'] = fi.historical_volatility(result['returns'].values, 20)
+        
+        # Price vs SMA ratios (additional)
+        for period in [5, 10, 20, 50, 100, 200]:
+            if f'sma_{period}' in result.columns:
+                result[f'price_vs_sma{period}'] = close / result[f'sma_{period}'].values
+        
+        # Don't drop NaN - models can handle them
+        # result = result.dropna()
         
         return result
     

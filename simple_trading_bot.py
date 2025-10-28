@@ -43,7 +43,7 @@ class SimpleTradingBot:
     """Простий торговий бот з Random Forest прогнозами"""
     
     def __init__(self, symbols: list = None, testnet: bool = True, enable_trading: bool = False):
-        self.symbols = symbols or ['BTCUSDT']  # Підтримка мультисимволів
+        self.symbols = symbols or ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT', 'SOLUSDT', 'DOTUSDT']  # Обмежено до 6 символів
         self.testnet = testnet
         self.enable_trading = enable_trading  # Чи виконувати реальні угоди
         
@@ -90,7 +90,7 @@ class SimpleTradingBot:
         
         # Налаштування trading
         self.min_confidence = 0.80  # Мінімальна впевненість для відкриття (80%)
-        self.position_size_usd = 500.0  # Фіксований розмір позиції $500
+        self.position_size_usd = 50.0  # Зменшено для тестування $50
         self.stop_loss_pct = 0.02   # 2% stop-loss
         self.take_profit_pct = 0.05 # 5% take-profit
         self.leverage = 25          # Плече 25x
@@ -449,7 +449,7 @@ class SimpleTradingBot:
             predictions = {}
             
             for tf in timeframes:
-                df = await self.get_market_data(symbol, interval=tf, limit=500)
+                df = await self.get_market_data(symbol, interval=tf, limit=1000)
                 
                 if df.empty:
                     logger.warning(f"⚠️ {symbol} {tf}: немає даних")
@@ -1180,7 +1180,8 @@ async def main():
     parser.add_argument('--testnet', action='store_true', default=True, help='Use testnet')
     parser.add_argument('--enable-trading', action='store_true', help='Enable real trading (default: demo)')
     parser.add_argument('--interval', type=int, default=3600, help='Check interval (seconds)')
-    parser.add_argument('--min-confidence', type=float, default=0.70, help='Minimum confidence (default: 0.70)')
+    parser.add_argument('--position-size', type=float, default=50.0, help='Position size in USD (default: 50.0)')
+    parser.add_argument('--min-confidence', type=float, default=0.67, help='Minimum confidence (default: 0.67)')
     
     args = parser.parse_args()
     
@@ -1190,6 +1191,7 @@ async def main():
         enable_trading=args.enable_trading
     )
     bot.min_confidence = args.min_confidence
+    bot.position_size_usd = args.position_size
     
     await bot.run(interval_seconds=args.interval)
 

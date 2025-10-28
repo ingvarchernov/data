@@ -210,6 +210,11 @@ async def save_position(db, position_data: dict) -> int:
         ID збереженої позиції
     """
     try:
+        # Конвертуємо metadata в JSON рядок якщо потрібно
+        if 'metadata' in position_data and isinstance(position_data['metadata'], dict):
+            import json
+            position_data['metadata'] = json.dumps(position_data['metadata'])
+            
         async with db.async_session_factory() as session:
             result = await session.execute(
                 text("""
@@ -244,6 +249,11 @@ async def save_trade(db, trade_data: dict) -> int:
         ID збереженої угоди
     """
     try:
+        # Конвертуємо metadata в JSON рядок якщо потрібно
+        if 'metadata' in trade_data and isinstance(trade_data['metadata'], dict):
+            import json
+            trade_data['metadata'] = json.dumps(trade_data['metadata'])
+            
         async with db.async_session_factory() as session:
             result = await session.execute(
                 text("""
