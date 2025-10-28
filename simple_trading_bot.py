@@ -89,7 +89,7 @@ class SimpleTradingBot:
         self.max_daily_losses_per_symbol = 3  # Максимум 3 програшні угоди на день
         
         # Налаштування trading
-        self.min_confidence = 0.70  # Мінімальна впевненість для відкриття (70%)
+        self.min_confidence = 0.80  # Мінімальна впевненість для відкриття (80%)
         self.position_size_usd = 500.0  # Фіксований розмір позиції $500
         self.stop_loss_pct = 0.02   # 2% stop-loss
         self.take_profit_pct = 0.05 # 5% take-profit
@@ -308,6 +308,32 @@ class SimpleTradingBot:
         except Exception as e:
             logger.error(f"❌ Помилка завантаження даних: {e}")
             return pd.DataFrame()
+    
+    async def get_atr(self, symbol: str, period: int = 14) -> float:
+        """Отримання ATR для динамічних SL/TP"""
+        try:
+            df = await self.get_market_data(symbol, '1h', 100)  # 1h для ATR
+            if df.empty:
+                return 0.01  # Default fallback
+            
+            # Розрахунок ATR через Rust
+            df_features = self.feature_engineer.calculate_all(
+                df, atr_periods=[period]
+            )
+            
+            atr_col = f'atr_{period}'
+            if atr_col in df_features.columns:
+                current_atr = df_features[atr_col].iloc[-1]
+                if pd.isna(current_atr):
+                    return 0.01
+                return current_atr
+            else:
+                logger.warning(f"⚠️ ATR не розраховано для {symbol}")
+                return 0.01
+                
+        except Exception as e:
+            logger.error(f"❌ Помилка розрахунку ATR для {symbol}: {e}")
+            return 0.01
     
     async def predict(self, symbol: str, df: pd.DataFrame) -> dict:
         """Прогноз напрямку руху"""
@@ -608,9 +634,13 @@ class SimpleTradingBot:
                 filled_qty = quantity
                 logger.warning(f"⚠️ Позиція ще не оновилась, використовую розрахункові: {filled_qty:.6f} @ ${filled_price:.2f}")
             
-            # Stop-loss і Take-profit ціни
-            sl_price = filled_price * (1 - self.stop_loss_pct)
-            tp_price = filled_price * (1 + self.take_profit_pct)
+            # Stop-loss і Take-profit ціни (динамічні на основі ATR)
+            atr = await self.get_atr(symbol, 14)
+            sl_distance = 2.0 * atr  # 2 ATR для SL
+            tp_distance = 4.0 * atr  # 4 ATR для TP
+            
+            sl_price = filled_price - sl_distance  # Для LONG: нижче entry
+            tp_price = filled_price + tp_distance  # Для LONG: вище entry
             
             # Виставляємо STOP_MARKET для SL
             try:
@@ -766,9 +796,13 @@ class SimpleTradingBot:
                 filled_qty = quantity
                 logger.warning(f"⚠️ Позиція ще не оновилась, використовую розрахункові значення")
             
-            # SL/TP для SHORT (інвертовані)
-            sl_price = filled_price * (1 + self.stop_loss_pct)  # SL вище
-            tp_price = filled_price * (1 - self.take_profit_pct)  # TP нижче
+            # SL/TP для SHORT (динамічні на основі ATR)
+            atr = await self.get_atr(symbol, 14)
+            sl_distance = 2.0 * atr  # 2 ATR для SL
+            tp_distance = 4.0 * atr  # 4 ATR для TP
+            
+            sl_price = filled_price + sl_distance  # Для SHORT: вище entry
+            tp_price = filled_price - tp_distance  # Для SHORT: нижче entry
             
             # Виставляємо STOP_MARKET для SL (BUY to close SHORT)
             try:

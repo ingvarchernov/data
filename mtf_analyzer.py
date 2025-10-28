@@ -30,8 +30,8 @@ class MultiTimeframeAnalyzer:
     def __init__(self):
         self.timeframes = {
             '4h': {'weight': 0.5, 'interval': '4h'},   # Основний тренд
-            '1h': {'weight': 0.3, 'interval': '1h'},   # Підтвердження
-            '15m': {'weight': 0.2, 'interval': '15m'}  # Точка входу
+            '1h': {'weight': 0.4, 'interval': '1h'},   # Підтвердження
+            '15m': {'weight': 0.1, 'interval': '15m'}  # Точка входу (зменшено)
         }
     
     def analyze(
@@ -99,17 +99,18 @@ class MultiTimeframeAnalyzer:
             logger.info("⚖️ MTF: рівновага між UP/DOWN")
             return None
         
-        # Перевірка вимоги повного співпадіння
-        if require_alignment:
-            all_same = all(d == final_direction for d in directions.values())
-            if not all_same:
-                logger.info(
-                    f"⚠️ MTF: розбіжність напрямків - "
-                    f"4h:{directions.get('4h')}, "
-                    f"1h:{directions.get('1h')}, "
-                    f"15m:{directions.get('15m')}"
-                )
-                return None
+        # Перевірка консенсусу (2/3 majority замість 100%)
+        total_weight = sum(self.timeframes[tf]['weight'] for tf in directions.keys())
+        consensus_threshold = total_weight * 0.6  # 60% для 2/3
+        
+        if consensus_strength < consensus_threshold:
+            logger.info(
+                f"⚠️ MTF: недостатній консенсус ({consensus_strength:.1f}/{total_weight:.1f}) - "
+                f"4h:{directions.get('4h')}, "
+                f"1h:{directions.get('1h')}, "
+                f"15m:{directions.get('15m')}"
+            )
+            return None
         
         # Розрахунок зваженої впевненості
         weighted_confidence = sum(
