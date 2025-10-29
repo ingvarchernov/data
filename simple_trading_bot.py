@@ -191,6 +191,42 @@ class SimpleTradingBot:
         else:
             return f"{quantity:.{precision}f}"
 
+    async def cancel_all_orders(self, symbol: str) -> bool:
+        """Скасування всіх відкритих ордерів для символу"""
+        try:
+            # Отримуємо всі відкриті ордери для символу
+            open_orders = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.client.futures_get_open_orders(symbol=symbol)
+            )
+            
+            if not open_orders:
+                logger.info(f"ℹ️ {symbol}: немає відкритих ордерів")
+                return True
+            
+            logger.info(f"🗑️ {symbol}: скасування {len(open_orders)} відкритих ордерів...")
+            
+            # Скасовуємо всі ордери
+            for order in open_orders:
+                try:
+                    await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda o=order: self.client.futures_cancel_order(
+                            symbol=symbol,
+                            orderId=o['orderId']
+                        )
+                    )
+                    logger.info(f"   ✅ Скасовано: {order['type']} {order['side']} (ID: {order['orderId']})")
+                except Exception as e:
+                    logger.warning(f"   ⚠️ Не вдалося скасувати ордер {order['orderId']}: {e}")
+            
+            logger.info(f"✅ {symbol}: всі ордери скасовано")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Помилка скасування ордерів {symbol}: {e}")
+            return False
+    
     async def get_balance(self) -> float:
         """Отримання балансу"""
         try:
@@ -576,6 +612,10 @@ class SimpleTradingBot:
             if daily_losses >= self.max_daily_losses_per_symbol:
                 logger.warning(f"🚫 {symbol}: досягнуто ліміт програшів за день ({daily_losses}/{self.max_daily_losses_per_symbol})")
                 return False
+            
+            # 🗑️ КРИТИЧНО: Скасувати ВСІ старі ордери перед відкриттям нової позиції
+            logger.info(f"🗑️ {symbol}: скасування старих ордерів перед відкриттям позиції...")
+            await self.cancel_all_orders(symbol)
 
             # Розрахунок розміру позиції: $500 позиція з leverage 25x
             # Margin = $500 / 25 = $20
@@ -736,6 +776,10 @@ class SimpleTradingBot:
             if daily_losses >= self.max_daily_losses_per_symbol:
                 logger.warning(f"🚫 {symbol}: досягнуто ліміт програшів за день ({daily_losses}/{self.max_daily_losses_per_symbol})")
                 return False
+            
+            # 🗑️ КРИТИЧНО: Скасувати ВСІ старі ордери перед відкриттям нової позиції
+            logger.info(f"🗑️ {symbol}: скасування старих ордерів перед відкриттям позиції...")
+            await self.cancel_all_orders(symbol)
 
             # Розрахунок розміру позиції: $500 позиція з leverage 25x
             position_value = self.position_size_usd  # $500
