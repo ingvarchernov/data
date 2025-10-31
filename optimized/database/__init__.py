@@ -2,32 +2,18 @@
 Optimized Database Package
 
 Modules:
-- connection: Connection pooling  
-- cache: Redis + memory caching
+- connection: Connection pooling + async operations
+- cache: Memory caching (Redis optional for multi-bot)
+- positions: CRUD operations for positions tracking
 """
 
-from optimized.database.connection import (
-    DatabaseConnection,
-    db_manager,
-    save_trading_signal,
-    save_position,
-    save_trade,
-)
-from optimized.database.cache import CacheManager
-
-__all__ = [
-    'DatabaseConnection',
-    'CacheManager',
-    'db_manager',
-    'save_trading_signal',
-    'save_position',
-    'save_trade',
-]
-
-from .connection import DatabaseConnection
+from .connection import DatabaseConnection, db_manager
 from .cache import CacheManager
+from .positions import PositionDB
 
 __all__ = [
     'DatabaseConnection',
     'CacheManager',
+    'PositionDB',
+    'db_manager',
 ]

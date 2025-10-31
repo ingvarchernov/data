@@ -1,39 +1,45 @@
 """
 Database Cache Management
 
-Redis та memory caching для database queries:
-- Redis cache (distributed)
-- TTL cache (in-memory fallback)
+In-memory caching для database queries та ML predictions:
+- TTL cache (швидкий, простий)
 - Cache key generation
-- Serialization/deserialization
+- Serialization підтримка
+
+📝 NOTE: Redis можна додати пізніше для multi-bot setup:
+    - Розподілений кеш між кількома інстансами
+    - Shared state для координації ботів
+    - Rate limiting для API calls
+    Просто розкоментуйте Redis код нижче і додайте redis>=4.5.0 в requirements
 """
 
 import logging
-import pickle
 import hashlib
 import json
 from typing import Any, Optional
-import redis.asyncio as redis
 from cachetools import TTLCache
+
+# Для майбутнього multi-bot setup:
+# import redis.asyncio as redis
+# import pickle
 
 logger = logging.getLogger(__name__)
 
 
 class CacheManager:
     """
-    Управління кешуванням
+    Управління кешуванням (спрощена версія)
     
     Features:
-    - Redis cache (distributed, persistent)
-    - Memory cache (local, fast fallback)
-    - Automatic serialization
-    - TTL support
+    - Memory cache (швидкий, локальний)
+    - Automatic TTL
+    - Simple key generation
+    
+    💡 Для multi-bot setup додайте Redis
     """
     
     def __init__(
         self,
-        redis_url: str = "redis://localhost:6379",
-        use_redis: bool = True,
         cache_ttl: int = 3600,
         memory_cache_size: int = 1000
     ):
@@ -41,44 +47,18 @@ class CacheManager:
         Ініціалізація
         
         Args:
-            redis_url: Redis connection URL
-            use_redis: Enable Redis caching
             cache_ttl: Cache time-to-live (seconds)
             memory_cache_size: Memory cache max size
         """
-        self.use_redis = use_redis
         self.cache_ttl = cache_ttl
         
-        # Memory cache (завжди доступний)
+        # Memory cache (єдиний варіант зараз)
         self.memory_cache = TTLCache(maxsize=memory_cache_size, ttl=cache_ttl)
+        logger.info(f"✅ Memory cache initialized (size: {memory_cache_size}, ttl: {cache_ttl}s)")
         
-        # Redis client
-        self.redis_client = None
-        if use_redis:
-            try:
-                self.redis_client = redis.from_url(
-                    redis_url,
-                    max_connections=20,
-                    decode_responses=False
-                )
-                logger.info("✅ Redis client created")
-            except Exception as e:
-                logger.warning(f"⚠️ Redis unavailable, using memory cache only: {e}")
-                self.use_redis = False
-    
-    async def test_redis(self) -> bool:
-        """Тестування Redis з'єднання"""
-        if not self.use_redis or not self.redis_client:
-            return False
-        
-        try:
-            await self.redis_client.ping()
-            logger.info("✅ Redis connection successful")
-            return True
-        except Exception as e:
-            logger.warning(f"⚠️ Redis ping failed: {e}")
-            self.use_redis = False
-            return False
+        # Redis відключений (можна додати пізніше)
+        # self.redis_client = None
+        # self.use_redis = False
     
     @staticmethod
     def generate_cache_key(query: str, params: dict = None) -> str:
@@ -108,16 +88,7 @@ class CacheManager:
         Returns:
             Cached value or None
         """
-        # Спробувати Redis
-        if self.use_redis and self.redis_client:
-            try:
-                data = await self.redis_client.get(key)
-                if data:
-                    return pickle.loads(data)
-            except Exception as e:
-                logger.debug(f"Redis get failed: {e}")
-        
-        # Fallback до memory cache
+        # Memory cache only (просто і швидко)
         return self.memory_cache.get(key)
     
     async def set(self, key: str, value: Any, ttl: Optional[int] = None):
@@ -127,48 +98,39 @@ class CacheManager:
         Args:
             key: Cache key
             value: Value to cache
-            ttl: Time-to-live (seconds), uses default if None
+            ttl: Time-to-live (ignored for now, uses default TTL)
         """
-        if ttl is None:
-            ttl = self.cache_ttl
-        
-        # Зберегти в Redis
-        if self.use_redis and self.redis_client:
-            try:
-                data = pickle.dumps(value)
-                await self.redis_client.setex(key, ttl, data)
-            except Exception as e:
-                logger.debug(f"Redis set failed: {e}")
-        
-        # Зберегти в memory cache
+        # Memory cache only
         self.memory_cache[key] = value
+        
+        # Для майбутнього Redis:
+        # if ttl is None:
+        #     ttl = self.cache_ttl
+        # data = pickle.dumps(value)
+        # await self.redis_client.setex(key, ttl, data)
     
     async def delete(self, key: str):
         """Видалення з кешу"""
-        if self.use_redis and self.redis_client:
-            try:
-                await self.redis_client.delete(key)
-            except Exception as e:
-                logger.debug(f"Redis delete failed: {e}")
-        
         if key in self.memory_cache:
             del self.memory_cache[key]
+        
+        # Для майбутнього Redis:
+        # await self.redis_client.delete(key)
     
     async def clear(self):
         """Очистка всього кешу"""
-        if self.use_redis and self.redis_client:
-            try:
-                await self.redis_client.flushdb()
-            except Exception as e:
-                logger.debug(f"Redis clear failed: {e}")
-        
         self.memory_cache.clear()
         logger.info("✅ Cache cleared")
+        
+        # Для майбутнього Redis:
+        # await self.redis_client.flushdb()
     
     async def close(self):
-        """Закриття Redis з'єднання"""
-        if self.redis_client:
-            await self.redis_client.close()
+        """Закриття з'єднань (для майбутнього Redis)"""
+        # Для майбутнього Redis:
+        # if self.redis_client:
+        #     await self.redis_client.close()
+        pass
 
 
 __all__ = [

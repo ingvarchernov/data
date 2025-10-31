@@ -16,27 +16,38 @@ __pycache__/
 # Database
 *.db
 *.sqlite3
+trading.db
 
 # Logs
 logs/
 *.log
 nohup.out
 
-# Models & Checkpoints
-models/*
-!models/.gitkeep
-# Але дозволяємо training/models/ - там код, не моделі
-!training/
+# Models & Training Data
+models/
 *.h5
 *.keras
 *.pkl
 *.joblib
+
+# Training scripts (не пушити на GitHub)
+training/
+incremental_retrain.py
+
+# Strategies (не пушити на GitHub)
+strategies/mean_reversion.py
+strategies/trend_following.py
+strategies/strategy_selector.py
 
 # Data files
 *.csv
 *.json
 data/
 dataset/
+
+# Rust/Cargo (fast_indicators)
+target/
+Cargo.lock
 
 # IDEs
 .idea/
@@ -47,6 +58,15 @@ dataset/
 # Archives
 *.zip
 *.tar.gz
+
+# Deprecated/Temporary
+deprecated/
+temp/
+tmp/
+ 
+# Do not version control training artifacts and strategies code (local only)
+training/
+strategies/
 *.tar
 *.rar
 *.tar.bz2
