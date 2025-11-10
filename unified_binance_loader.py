@@ -64,7 +64,7 @@ class UnifiedBinanceLoader:
         use_public_data: bool = True
     ):
         """
-        Ініціалізація завантажувача
+        Ініціалізація завантажувача (SPOT API ONLY)
         
         Args:
             api_key: Binance API ключ
@@ -90,8 +90,14 @@ class UnifiedBinanceLoader:
         
         # API ключі
         if use_public_data:
-            self.api_key = "public"
-            self.api_secret = "public"
+            # Для публічних даних використовуємо mainnet ключі якщо testnet=False
+            if not testnet and not api_key:
+                self.api_key = os.getenv('API_KEY', 'public')
+                self.api_secret = os.getenv('API_SECRET', 'public')
+                logger.info(f"🔑 Using MAINNET API keys for historical data")
+            else:
+                self.api_key = "public"
+                self.api_secret = "public"
         else:
             # Використовуємо FUTURES_API_KEY / FUTURES_API_SECRET як пріоритетні
             self.api_key = (
@@ -123,7 +129,7 @@ class UnifiedBinanceLoader:
         logger.info(
             f"✅ UnifiedBinanceLoader ініціалізовано: "
             f"source={self.data_source.value}, testnet={testnet}, "
-            f"public={use_public_data}"
+            f"public={use_public_data}, SPOT API only"
         )
 
     def _initialize_clients(self):
@@ -133,15 +139,18 @@ class UnifiedBinanceLoader:
                 if not BINANCE_AVAILABLE:
                     raise ImportError("python-binance не встановлено")
                 
-                if not self.use_public_data:
+                # Якщо маємо реальні ключі (не "public"), використовуємо їх
+                if self.api_key and self.api_key != "public":
                     self.binance_client = Client(
                         self.api_key,
                         self.api_secret,
                         testnet=self.testnet
                     )
+                    logger.debug(f"🔑 Binance client with API keys (testnet={self.testnet})")
                 else:
                     # Публічний клієнт
                     self.binance_client = Client("", "", testnet=self.testnet)
+                    logger.debug(f"🌐 Binance public client (testnet={self.testnet})")
                 
             elif self.data_source == DataSource.CCXT:
                 if not CCXT_AVAILABLE:
@@ -287,6 +296,8 @@ class UnifiedBinanceLoader:
         # python-binance синхронний, тому викликаємо в executor
         loop = asyncio.get_event_loop()
         
+        # SPOT API з chunked loading для великих періодів
+        # Binance Spot API підтримує необмежену кількість свічок через пагінацію
         klines = await loop.run_in_executor(
             None,
             self.binance_client.get_historical_klines,
@@ -295,6 +306,8 @@ class UnifiedBinanceLoader:
             int(start_date.timestamp() * 1000),
             int(end_date.timestamp() * 1000)
         )
+        
+        logger.debug(f"📊 Завантажено {len(klines)} свічок для {symbol} через Spot API")
         
         return self._klines_to_dataframe(klines)
 
@@ -461,7 +474,10 @@ class UnifiedBinanceLoader:
         return interval_map.get(interval, 60 * 60 * 1000)
 
     def _process_ohlcv_data(self, ohlcv: List[List]) -> pd.DataFrame:
-        """Обробка OHLCV даних від CCXT"""
+        """
+        Обробка OHLCV даних від CCXT
+        ⭐ Мінімізовано апроксимації
+        """
         if not ohlcv:
             return pd.DataFrame()
         
@@ -470,21 +486,44 @@ class UnifiedBinanceLoader:
             columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
         )
         
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        # ⭐ UTC timezone для консистентності
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         df.set_index('timestamp', inplace=True)
         
-        # Додаткові колонки
-        df['quote_av'] = df['volume'] * df['close']
+        # ⭐ Quote asset volume - розраховується як volume * average price
+        # Використовуємо (high + low) / 2 як краще наближення ніж просто close
+        df['quote_av'] = df['volume'] * ((df['high'] + df['low']) / 2)
+        
+        # CCXT не надає детальну інформацію про trades
         df['trades'] = 0
-        df['tb_base_av'] = df['volume'] * 0.5
+        df['tb_base_av'] = df['volume'] * 0.5  # Припущення: 50% від покупців
         df['tb_quote_av'] = df['quote_av'] * 0.5
         
         return df
 
     def _klines_to_dataframe(self, klines: List[List]) -> pd.DataFrame:
-        """Конвертація klines від python-binance в DataFrame"""
+        """
+        Конвертація klines від python-binance в DataFrame
+        ⭐ ВИКОРИСТОВУЄ РЕАЛЬНІ ДАНІ без апроксимацій
+        """
         if not klines:
             return pd.DataFrame()
+        
+        # Binance klines structure:
+        # [
+        #   0: Open time (ms)
+        #   1: Open
+        #   2: High
+        #   3: Low
+        #   4: Close
+        #   5: Volume
+        #   6: Close time (ms)
+        #   7: Quote asset volume
+        #   8: Number of trades
+        #   9: Taker buy base asset volume
+        #   10: Taker buy quote asset volume
+        #   11: Ignore
+        # ]
         
         df = pd.DataFrame(klines, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume',
@@ -492,17 +531,28 @@ class UnifiedBinanceLoader:
             'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
         ])
         
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        # ⭐ Використовуємо open_time для timestamp (як на Binance UI)
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         df.set_index('timestamp', inplace=True)
         
-        # Вибір потрібних колонок
-        df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
+        # Конвертуємо типи
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume', 
+                       'quote_asset_volume', 'taker_buy_base_asset_volume', 
+                       'taker_buy_quote_asset_volume']
+        df[numeric_cols] = df[numeric_cols].astype(float)
+        df['number_of_trades'] = df['number_of_trades'].astype(int)
         
-        # Додаткові колонки
-        df['quote_av'] = df['volume'] * df['close']
-        df['trades'] = 0
-        df['tb_base_av'] = df['volume'] * 0.5
-        df['tb_quote_av'] = df['quote_av'] * 0.5
+        # ⭐ ВИКОРИСТОВУЄМО РЕАЛЬНІ ЗНАЧЕННЯ (не апроксимації!)
+        df = df.rename(columns={
+            'quote_asset_volume': 'quote_av',
+            'number_of_trades': 'trades',
+            'taker_buy_base_asset_volume': 'tb_base_av',
+            'taker_buy_quote_asset_volume': 'tb_quote_av'
+        })
+        
+        # Залишаємо тільки потрібні колонки
+        df = df[['open', 'high', 'low', 'close', 'volume', 
+                'quote_av', 'trades', 'tb_base_av', 'tb_quote_av']]
         
         return df
 
