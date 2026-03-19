@@ -1,0 +1,39 @@
+services:
+
+  # ── Scanner: runs main.py (scan + generate PDF charts) ─────────────────────
+  scanner:
+    build: .
+    image: crypto-scanner:latest
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    volumes:
+      - ./models:/app/models
+      - ./charts:/app/charts
+      - ./logs:/app/logs
+    command: python main.py
+    restart: "no"
+
+  # ── Trainer: runs train_ml_models.py with GPU ───────────────────────────────
+  # Usage: docker compose --profile train up trainer
+  trainer:
+    build: .
+    image: crypto-scanner:latest
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    volumes:
+      - ./models:/app/models
+      - ./logs:/app/logs
+    command: python train_ml_models.py
+    restart: "no"
+    profiles:
+      - train

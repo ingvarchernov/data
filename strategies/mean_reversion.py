@@ -7,6 +7,7 @@
 from typing import Optional, Dict, Any
 import pandas as pd
 import numpy as np
+from config import STRATEGY_CONFIG
 from .base import BaseStrategy, Signal
 
 
@@ -26,7 +27,7 @@ class MeanReversionStrategy(BaseStrategy):
     """
     
     def __init__(self, config: Dict[str, Any] = None):
-        default_config = {
+        default_config = STRATEGY_CONFIG.get('mean_reversion', {}).copy() or {
             'min_confidence': 60,
             'bb_period': 20,
             'bb_std': 2,

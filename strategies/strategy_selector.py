@@ -8,7 +8,9 @@ from typing import Optional, Dict, Any, List
 import pandas as pd
 import logging
 
-from strategies.base import BaseStrategy, Signal
+from config import STRATEGY_SELECTOR_CONFIG
+
+from strategies.base import Signal
 from strategies.trend_following import TrendFollowingStrategy
 from strategies.mean_reversion import MeanReversionStrategy
 
@@ -27,6 +29,8 @@ class StrategySelector:
     
     def __init__(self, config: Dict[str, Any] = None):
         self.config = config or {}
+        self.selector_config = STRATEGY_SELECTOR_CONFIG.copy()
+        self.selector_config.update(self.config.get('selector', {}))
         
         # Створити всі доступні стратегії
         self.strategies = {
@@ -54,7 +58,11 @@ class StrategySelector:
         sma_50 = df['sma_50'].iloc[-1]
         
         # Нахил SMA
-        sma_slope = (df['sma_50'].iloc[-1] - df['sma_50'].iloc[-10]) / 10 if len(df) >= 10 else 0
+        slope_lookback = int(self.selector_config.get('sma_slope_lookback', 10))
+        if len(df) >= slope_lookback:
+            sma_slope = (df['sma_50'].iloc[-1] - df['sma_50'].iloc[-slope_lookback]) / slope_lookback
+        else:
+            sma_slope = 0
         
         # Відстань від SMA
         distance_from_sma = abs(current_price - sma_50) / sma_50 * 100
@@ -64,14 +72,16 @@ class StrategySelector:
         volatility = returns.std() * 100
         
         # Визначення режиму
-        if distance_from_sma > 5.0:  # Сильний тренд
+        strong_trend_distance = float(self.selector_config.get('strong_trend_distance_pct', 5.0))
+        moderate_trend_distance = float(self.selector_config.get('moderate_trend_distance_pct', 2.0))
+        if distance_from_sma > strong_trend_distance:  # Сильний тренд
             if current_price > sma_50 and sma_slope > 0:
                 regime = 'STRONG_UPTREND'
             elif current_price < sma_50 and sma_slope < 0:
                 regime = 'STRONG_DOWNTREND'
             else:
                 regime = 'TREND_WEAKENING'
-        elif distance_from_sma > 2.0:  # Помірний тренд
+        elif distance_from_sma > moderate_trend_distance:  # Помірний тренд
             if current_price > sma_50 and sma_slope > 0:
                 regime = 'UPTREND'
             elif current_price < sma_50 and sma_slope < 0:
@@ -82,9 +92,11 @@ class StrategySelector:
             regime = 'RANGE'
         
         # Визначення волатильності
-        if volatility > 3.0:
+        high_volatility = float(self.selector_config.get('high_volatility_pct', 3.0))
+        medium_volatility = float(self.selector_config.get('medium_volatility_pct', 1.5))
+        if volatility > high_volatility:
             vol_regime = 'HIGH'
-        elif volatility > 1.5:
+        elif volatility > medium_volatility:
             vol_regime = 'MEDIUM'
         else:
             vol_regime = 'LOW'
@@ -185,10 +197,11 @@ class StrategySelector:
         """Отримати найкращу стратегію за результатами"""
         best_strategy = None
         best_win_rate = 0
+        min_trades = int(self.selector_config.get('min_trades_for_ranking', 10))
         
         for name, perf in self.performance.items():
             total = perf['wins'] + perf['losses']
-            if total > 10:  # Мінімум 10 угод для оцінки
+            if total > min_trades:
                 win_rate = perf['wins'] / total
                 if win_rate > best_win_rate:
                     best_win_rate = win_rate

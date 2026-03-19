@@ -1,0 +1,36 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Rust build artifacts (compiled in builder stage, not needed in context)
+pattern_detector/target/
+target/
+Cargo.lock
+
+# Git
+.git/
+.gitignore
+
+# Env secrets (passed via --env-file)
+.env
+.env.local
+
+# Generated output (mounted as volumes)
+charts/
+logs/
+models/
+
+# Temporary and editor files
+*.log
+*.bak
+*.tmp
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Test files
+test_*.py

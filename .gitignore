@@ -53,9 +53,11 @@ Cargo.lock
 # Test results
 backtest_results/
 
-# Charts (тільки README)
+# Charts (generated output — keep only README)
 charts/*.png
 charts/*.jpg
+charts/*.pdf
+charts/charts_manifest.json
 !charts/README.md
 
 # PostgreSQL dumps

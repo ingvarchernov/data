@@ -126,17 +126,30 @@ class PatternVisualizer:
             
             print(f"  📊 Обчислення індикаторів...")
             
-            # Calculate technical indicators using fast Rust implementation
-            from pattern_detector import calculate_indicators
-            indicators = calculate_indicators(df['close'].values.tolist())
-            
-            # Extract indicators
-            df['ema_20'] = indicators['ema20']
-            df['ema_50'] = indicators['ema50']
-            df['rsi'] = indicators['rsi']
-            df['macd'] = indicators['macd_line']
-            df['macd_signal'] = indicators['macd_signal']
-            df['macd_hist'] = indicators['macd_histogram']
+            # Calculate technical indicators - try Rust first, fallback to pandas_ta
+            try:
+                from pattern_detector import calculate_indicators
+                indicators = calculate_indicators(df['close'].values.tolist())
+                df['ema_20'] = indicators['ema20']
+                df['ema_50'] = indicators['ema50']
+                df['rsi'] = indicators['rsi']
+                df['macd'] = indicators['macd_line']
+                df['macd_signal'] = indicators['macd_signal']
+                df['macd_hist'] = indicators['macd_histogram']
+            except (ImportError, RuntimeError, KeyError, TypeError) as e:
+                logger.warning(f"⚠️ Pattern detector unavailable ({e}), using pandas_ta")
+                df['ema_20'] = ta.ema(df['close'], length=20)
+                df['ema_50'] = ta.ema(df['close'], length=50)
+                df['rsi'] = ta.rsi(df['close'], length=14)
+                macd_result = ta.macd(df['close'], fast=12, slow=26, signal=9)
+                if macd_result is not None and not macd_result.empty:
+                    df['macd'] = macd_result.iloc[:, 0]
+                    df['macd_signal'] = macd_result.iloc[:, 1] if len(macd_result.columns) > 1 else 0
+                    df['macd_hist'] = macd_result.iloc[:, 2] if len(macd_result.columns) > 2 else 0
+                else:
+                    df['macd'] = 0
+                    df['macd_signal'] = 0
+                    df['macd_hist'] = 0
             
             # Trade details
             entry_price = trade['entry_price']
@@ -224,10 +237,13 @@ class PatternVisualizer:
             entry_time_naive = entry_time.tz_localize(None) if entry_time.tz else entry_time
             exit_time_naive = exit_time.tz_localize(None) if exit_time.tz else exit_time
             
-            entry_idx = df.index.get_indexer([entry_time_naive], method='nearest')[0]
-            exit_idx = df.index.get_indexer([exit_time_naive], method='nearest')[0]
+            entry_results = df.index.get_indexer([entry_time_naive], method='nearest')
+            entry_idx = entry_results[0] if len(entry_results) > 0 else -1
             
-            if 0 <= entry_idx < len(df):
+            exit_results = df.index.get_indexer([exit_time_naive], method='nearest')
+            exit_idx = exit_results[0] if len(exit_results) > 0 else -1
+            
+            if entry_idx >= 0 and entry_idx < len(df):
                 fig.add_trace(go.Scatter(
                     x=[df.index[entry_idx]],
                     y=[entry_price],
@@ -237,7 +253,7 @@ class PatternVisualizer:
                     name='Entry'
                 ), row=1, col=1)
             
-            if 0 <= exit_idx < len(df):
+            if exit_idx >= 0 and exit_idx < len(df):
                 fig.add_trace(go.Scatter(
                     x=[df.index[exit_idx]],
                     y=[exit_price],

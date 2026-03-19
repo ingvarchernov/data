@@ -7,7 +7,6 @@ import logging
 from typing import Dict, Optional, Tuple
 import pandas as pd
 import numpy as np
-from enum import Enum
 
 logger = logging.getLogger(__name__)
 
@@ -18,14 +17,15 @@ try:
 except ImportError:
     ENHANCED_ANALYTICS_AVAILABLE = False
     logger.warning("Enhanced analytics not available, using basic methods")
-
-
-class MarketRegime(Enum):
-    """Ринки режими"""
-    TRENDING_UP = "trending_up"
-    TRENDING_DOWN = "trending_down"
-    RANGING = "ranging"
-    VOLATILE = "volatile"
+    
+    # Fallback enum definition
+    from enum import Enum
+    class MarketRegime(Enum):
+        """Ринки режими"""
+        TRENDING_UP = "trending_up"
+        TRENDING_DOWN = "trending_down"
+        RANGING = "ranging"
+        VOLATILE = "volatile"
 
 
 class PatternAnalytics:

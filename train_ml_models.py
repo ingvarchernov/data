@@ -148,6 +148,14 @@ class TrainConfig:
     thermal_guard_enabled: bool = True
     thermal_guard_temp_c: int = 82
     thermal_cooldown_sec: float = 2.0
+    enable_checkpoint_resume: bool = True
+    checkpoint_interval: int = 5
+    enable_memory_cleanup: bool = True
+    gpu_cleanup_interval: int = 10
+    checkpoint_interval: int = 5
+    enable_gradient_accum: bool = True
+    accumulation_steps: int = 2
+    enable_memory_cleanup: bool = True
 
 
 class SequenceDataset(Dataset):
@@ -522,8 +530,23 @@ class MLTrainer:
         best_epoch = 0
         patience = 0
         history = []
+        start_epoch = 1
+        
+        # Try to resume from checkpoint if enabled
+        if self.config.enable_checkpoint_resume and (self.model_path / "lstm_model.pt").exists():
+            try:
+                checkpoint = torch.load(self.model_path / "lstm_model.pt", map_location=self.device, weights_only=False)
+                model.load_state_dict(checkpoint["model_state_dict"])
+                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                start_epoch = checkpoint.get("epoch", 0) + 1
+                best_val_loss = checkpoint.get("val_loss", float("inf"))
+                if start_epoch <= self.config.max_epochs:
+                    logger.info("Resumed training from epoch %d (best val_loss=%.6f)", start_epoch, best_val_loss)
+            except Exception as e:
+                logger.warning("Could not resume from checkpoint: %s. Starting fresh.", e)
+                start_epoch = 1
 
-        for epoch in range(1, self.config.max_epochs + 1):
+        for epoch in range(start_epoch, self.config.max_epochs + 1):
             epoch_start = time.perf_counter()
             train_loss = self._train_epoch(model, train_loader, optimizer, criterion, scaler, epoch)
             val_loss, val_metrics = self._evaluate_epoch(model, val_loader, criterion)
@@ -555,6 +578,12 @@ class MLTrainer:
                 self._save_checkpoint(model, optimizer, epoch, best_val_loss)
             else:
                 patience += 1
+            
+            # Periodic checkpoints to enable recovery from crashes
+            if self.config.enable_checkpoint_resume and epoch % self.config.checkpoint_interval == 0:
+                self._save_checkpoint(model, optimizer, epoch, val_loss)
+                if self.config.enable_memory_cleanup:
+                    torch.cuda.empty_cache()
 
             if patience >= self.config.early_stopping_patience:
                 logger.info("Early stopping at epoch %d", epoch)
@@ -684,6 +713,10 @@ class MLTrainer:
             scaler.update()
 
             losses.append(float(loss.item()))
+
+            # Periodic memory cleanup to prevent fragmentation
+            if self.config.enable_memory_cleanup and batch_idx % self.config.gpu_cleanup_interval == 0:
+                torch.cuda.empty_cache()
 
             if self.config.console_batch_logging and batch_idx % self.config.log_every_n_batches == 0:
                 elapsed = time.perf_counter() - batch_start
@@ -827,7 +860,9 @@ class MLTrainer:
 
 
 async def run_training() -> None:
-    symbols = [
+    from config import FUTURES_SYMBOLS
+    # Combine stable major coins with the actual scanning targets for a well-rounded model
+    base_symbols = [
         "BTCUSDT",
         "ETHUSDT",
         "BNBUSDT",
@@ -837,6 +872,8 @@ async def run_training() -> None:
         "DOGEUSDT",
         "LINKUSDT",
     ]
+    # dict.fromkeys preserves order and deduplicates
+    symbols = list(dict.fromkeys(base_symbols + FUTURES_SYMBOLS))
     config = TrainConfig(
         symbols=symbols,
         lookback_days=365,
@@ -855,11 +892,14 @@ async def run_training() -> None:
         console_batch_logging=True,
         log_every_n_batches=10,
         use_mixed_precision=True,
-        gpu_memory_fraction=0.95,
-        batch_sleep_sec=0.0,
+        gpu_memory_fraction=0.90,  # Reduced from 0.95 for more stability
+        batch_sleep_sec=0.05,  # Increased from 0.0 for thermal relief
         thermal_guard_enabled=True,
-        thermal_guard_temp_c=84,
-        thermal_cooldown_sec=2.0,
+        thermal_guard_temp_c=80,  # Lowered from 84 to prevent crashes
+        thermal_cooldown_sec=3.0,  # Increased from 2.0 for better cooling
+        enable_checkpoint_resume=True,  # Enable resume capability
+        checkpoint_interval=5,  # Save every 5 epochs
+        enable_memory_cleanup=True,  # Cleanup cache periodically
     )
 
     run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")

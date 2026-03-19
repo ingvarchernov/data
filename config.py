@@ -30,35 +30,40 @@ TESTNET_CONFIG = {
 BINANCE_CONFIG = TESTNET_CONFIG
 
 # ============================================================================
-# АВТОМАТИЧНЕ ВИЯВЛЕННЯ МОДЕЛЕЙ (ВИПРАВЛЕНО після 0% WR!)
+# MARKET DATA LOADER (UNIFIED)
 # ============================================================================
-# Backtest results (30 днів, жовтень):
-# 🥇 ETHUSDT + SwingML: +$49.41 (Sharpe 0.16, WR 44.7%)
-# 🥈 SOLUSDT + SwingML: +$19.18 (WR 40%)
-# 🥉 XRPUSDT + SwingML: +$17.91 (WR 40.2%)
-# 💰 BTCUSDT + Breakout: +$6.08 (Sharpe 0.11, WR 40.8%)
-# 💰 BNBUSDT + Breakout: +$3.18 (стабільний)
-#
-# ВИПРАВЛЕННЯ після аналізу (04.11.2025):
-# • ПРОБЛЕМА: Win Rate 33%, R/R = 0.79 (середній виграш $15, збиток $19)
-# • ПРИЧИНА: SL 1.2% / TP 1.0% = негативний профіль ризику
-# • РІШЕННЯ:
-#   - SL: 1.2% → 1.0% (щільніший стоп, less slippage)
-#   - TP: 1.0% → 2.5% (більший таргет, R/R = 2.5)
-#   - Мінімальний профіт: $15 (не відкривати дрібні угоди)
-#   - Максимальний збиток: $25 (обмеження розміру позиції)
-# • ОЧІКУВАННЯ: R/R 2.5 + WR 35-40% = прибутковість (EV > 0)
+MARKET_DATA_CONFIG = {
+    'data_source': 'auto',          # auto | python-binance | ccxt
+    'default_exchange': 'binance',  # binance, kraken, bybit, coinbase, ...
+    'default_market_type': 'spot',  # spot | futures | swap
+    'cache_ttl_sec': 300,
+    'max_retries': 3,
+    'retry_delay_sec': 0.5,
+    'rate_limit_delay_sec': 0.0,
+    'max_records_per_request': 1000,
+    'max_parallel_symbols': 8,
+}
 
-# ⚠️ КРИТИЧНЕ ВИПРАВЛЕННЯ (04.11.2025 - 13:30):
-# Після аналізу реальної торгівлі: WR 16.7%, PnL -$97.85
-# ПРОБЛЕМА: Занадто багато збиткових символів (5 з 6)
-# РІШЕННЯ: Залишити тільки BTCUSDT (єдиний прибутковий +$32)
-#          + ETHUSDT/SOLUSDT (кращі за backtest)
+# ============================================================================
+# DASHBOARD / SCANNER API
+# ============================================================================
+DASHBOARD_CONFIG = {
+    'host': '127.0.0.1',
+    'port': 8080,
+    'auto_scan_enabled': True,
+    'auto_scan_interval_sec': 300,
+    'scan_symbols_limit': 20,
+    'default_timeframe': '1h',
+    'default_lookback_days': 7,
+    'signal_limit': 100,
+    'signal_mode': 'risk_levels',      # 'risk_levels' | 'direction_only'
+    'sl_to_tp_ratio': 0.333333,        # SL distance = TP distance * ratio (1/3 => RR 1:3)
+    'project_future_bars': True,       # draw projected future path on chart
+    'future_bars_count': 6,
+}
 
-# 🚀 MEGA UPDATE (04.11.2025 - 20:00):
-# Протестовано 60 пар на 350 днів з leverage backtest!
-# РЕЗУЛЬТАТ: 5x leverage = $500 → $25,404 за 11.6 місяців (+4,981% ROI)
-# ТОП-10 ПАР з найкращими результатами (350 днів backtest):
+
+
 
 FUTURES_SYMBOLS = [
     '1INCHUSDT',   # 🥇 46.6% WR, $4.39/day, 307% ROI
@@ -230,6 +235,29 @@ STRATEGY_CONFIG = {
     },
 }
 
+# Додаткові налаштування селектора стратегій
+STRATEGY_SELECTOR_CONFIG = {
+    'strong_trend_distance_pct': 5.0,
+    'moderate_trend_distance_pct': 2.0,
+    'high_volatility_pct': 3.0,
+    'medium_volatility_pct': 1.5,
+    'sma_slope_lookback': 10,
+    'min_trades_for_ranking': 10,
+}
+
+# Налаштування LSTM моделі для runtime
+LSTM_MODEL_CONFIG = {
+    'model_path': 'models/lstm_model.pt',
+    'sequence_length': 64,
+    'feature_columns': [
+        'open', 'high', 'low', 'close', 'volume',
+        'ema_20', 'ema_50', 'ema_200',
+        'rsi', 'macd', 'macd_signal', 'macd_hist',
+        'bb_upper', 'bb_lower', 'bb_middle',
+        'atr', 'volatility', 'volume_ma', 'volume_ratio'
+    ]
+}
+
 # ============================================================================
 # MULTI-TIMEFRAME CONFIGURATION
 # ============================================================================
@@ -270,13 +298,14 @@ PATTERN_CONFIG = {
 # ============================================================================
 ENSEMBLE_CONFIG = {
     'enabled': True,
-    'ml_model_path': 'models/price_predictor.pkl',
+    'ml_model_path': 'models/lstm_model.pt',
     'weights': {
-        'pattern_confidence': 0.4,    # 40% - Pattern confidence
-        'ml_prediction': 0.35,        # 35% - ML model prediction
+        'pattern_confidence': 0.35,   # 35% - Pattern confidence
+        'ml_prediction': 0.40,        # 40% - LSTM model prediction
         'market_regime': 0.15,        # 15% - Market regime analysis
         'technical_signals': 0.1      # 10% - Technical indicators
     },
+    'decision_threshold': 0.50,
     'min_confidence_threshold': 60.0,  # Minimum confidence to accept signal
     'regime_adjustments': {
         'trending_up': {'tp_multiplier': 1.2, 'sl_multiplier': 0.8},

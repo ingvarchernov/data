@@ -7,6 +7,7 @@
 from typing import Optional, Dict, Any
 import pandas as pd
 import numpy as np
+from config import STRATEGY_CONFIG
 from .base import BaseStrategy, Signal
 
 
@@ -28,7 +29,7 @@ class TrendFollowingStrategy(BaseStrategy):
     """
     
     def __init__(self, config: Dict[str, Any] = None):
-        default_config = {
+        default_config = STRATEGY_CONFIG.get('trend_following', {}).copy() or {
             'min_confidence': 65,
             'sma_period': 50,
             'ema_period': 20,
