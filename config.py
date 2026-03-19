@@ -266,6 +266,27 @@ PATTERN_CONFIG = {
 }
 
 # ============================================================================
+# ENSEMBLE PREDICTOR
+# ============================================================================
+ENSEMBLE_CONFIG = {
+    'enabled': True,
+    'ml_model_path': 'models/price_predictor.pkl',
+    'weights': {
+        'pattern_confidence': 0.4,    # 40% - Pattern confidence
+        'ml_prediction': 0.35,        # 35% - ML model prediction
+        'market_regime': 0.15,        # 15% - Market regime analysis
+        'technical_signals': 0.1      # 10% - Technical indicators
+    },
+    'min_confidence_threshold': 60.0,  # Minimum confidence to accept signal
+    'regime_adjustments': {
+        'trending_up': {'tp_multiplier': 1.2, 'sl_multiplier': 0.8},
+        'trending_down': {'tp_multiplier': 1.2, 'sl_multiplier': 0.8},
+        'volatile': {'tp_multiplier': 0.8, 'sl_multiplier': 1.3},
+        'ranging': {'tp_multiplier': 1.0, 'sl_multiplier': 1.0}
+    }
+}
+
+# ============================================================================
 # SIGNAL WEIGHTS (ML + MTF + PATTERNS)
 # ============================================================================
 SIGNAL_WEIGHTS = {
